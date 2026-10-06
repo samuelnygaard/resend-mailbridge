@@ -29,7 +29,7 @@ never touch the bridge.
 | Bundled Dovecot + supervisord image | ✅ boots in production (after v2 fixes) |
 | Dovecot passwd-file config (multi-mailbox) | Container smoke test checks shared-password login and mailbox isolation |
 | End-to-end on real Resend → Libredesk | ⚠️ single mailbox reached boot; full loop + sender attribution not yet confirmed |
-| CI (`.github/workflows/publish.yml`) | ⚠️ written, never run. Needs `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repo secrets |
+| CI (`.github/workflows/publish.yml`) | Secrets configured by maintainer; Python regressions and native AMD64/ARM64 container smoke tests gate publishing. GitHub execution not yet verified |
 | Reconciler pagination | Bounded cursor sweeps and durable failed-ID retries, tested against a mock API |
 | Monitoring / alerting | ❌ none. `/healthz` exposes the data; nothing consumes it yet |
 

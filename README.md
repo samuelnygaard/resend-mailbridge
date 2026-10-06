@@ -161,3 +161,25 @@ docker build -t mailbridge:test .
 python tests/test_container.py --image mailbridge:test
 docker run --rm --entrypoint python -v "$PWD:/workspace:ro" -w /workspace mailbridge:test tests/test_entrypoint.py
 ```
+
+## Publishing to Docker Hub
+
+The GitHub Actions workflow publishes `samuelnygaard/mailbridge` after Python
+regressions and real Dovecot container smoke tests pass on native AMD64 and
+ARM64 runners. Pull requests and manual runs on other branches run checks only.
+
+Configure repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`; the
+token must have write access to `samuelnygaard/mailbridge`. Publishing uses:
+
+- Pushes to `main`: `latest` and `sha-<full-commit-SHA>`.
+- Version tags such as `v1.2.3`: `1.2.3` and the commit tag. Prereleases such
+  as `v1.2.3-rc.1` use their full version. Release tags leave `latest` unchanged;
+  shared minor-version aliases are omitted to avoid races between releases.
+- **Actions → Test and publish image → Run workflow**: choose `main` to rebuild
+  and publish `latest`.
+
+Publishing runs for the same ref are serialized to avoid simultaneous writes
+to their tags. Malformed release tags fail before any image is published. Changing
+these files locally does not publish; push the changes before starting a run
+in GitHub. Maintainer-reported secrets are configured; the workflow has not yet
+been verified by a GitHub Actions run.

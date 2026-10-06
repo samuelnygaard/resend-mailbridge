@@ -1,12 +1,15 @@
 """Regression tests for webhook security, delivery and recovery failures."""
 
 import base64
+import copy
 import datetime
 import json
 import os
 import pathlib
 import sys
 import tempfile
+import socketserver
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +31,10 @@ from svix.webhooks import Webhook
 
 class BridgeTest(unittest.TestCase):
     def setUp(self):
+        stats = copy.deepcopy(main.STATS)
+        self.addCleanup(lambda: (main.STATS.clear(), main.STATS.update(stats)))
+        for key in main.STATS:
+            main.STATS[key] = {} if key == "per_mailbox" else (0 if isinstance(main.STATS[key], int) else None)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = pathlib.Path(self.directory.name)
@@ -68,6 +75,88 @@ class SignedWebhookTests(BridgeTest):
                      '{"type":"email.received","data":"invalid"}'):
             with self.subTest(body=body):
                 self.assertEqual(self.signed_post(body).status_code, 400)
+
+
+class RejectingIMAP(socketserver.StreamRequestHandler):
+    def handle(self):
+        self.wfile.write(b"* OK IMAP ready\r\n")
+        while True:
+            try:
+                line = self.rfile.readline()
+            except ConnectionResetError:
+                return
+            if not line:
+                return
+            tag, command, *_ = line.split()
+            if command.upper() == b"CAPABILITY":
+                self.wfile.write(b"* CAPABILITY IMAP4rev1\r\n" + tag + b" OK capabilities\r\n")
+            elif command.upper() == b"LOGOUT":
+                self.wfile.write(b"* BYE closing\r\n" + tag + b" OK logout\r\n")
+                return
+            else:
+                self.wfile.write(tag + b" NO authentication failed\r\n")
+
+
+class HealthTests(BridgeTest):
+    def test_imap_greeting_without_working_authentication_is_unhealthy(self):
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), RejectingIMAP)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with patch.object(main, "IMAP_PORT", server.server_address[1]):
+            response = self.client.get("/healthz")
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.json()["detail"]["imap_ok"])
+
+    def test_ingest_error_cannot_publish_signed_download_url(self):
+        url = "https://storage.example/raw?X-Amz-Signature=PRIVATE-TOKEN"
+        with patch.object(main, "fetch_message", side_effect=RuntimeError("GET failed: " + url)):
+            response = self.signed_post({"type": "email.received", "data": {
+                "email_id": "failed-download", "to": ["support@example.com"],
+            }})
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("PRIVATE-TOKEN", self.client.get("/healthz").text)
+
+    def test_failed_reconciliation_is_recorded_without_leaking_urls(self):
+        with patch.object(main, "_get", side_effect=RuntimeError("https://example.com?secret=PRIVATE-TOKEN")):
+            with self.assertRaises(RuntimeError):
+                main.reconcile_once()
+        self.assertIsNotNone(main.STATS.get("last_reconcile_error"))
+        self.assertIsNotNone(main.STATS.get("last_reconcile_attempt_at"))
+        self.assertNotIn("PRIVATE-TOKEN", self.client.get("/healthz").text)
+
+    def test_reconciler_outage_and_stall_are_separate_from_imap(self):
+        with patch.object(main, "RECONCILER_ENABLED", True), \
+             patch.object(main, "imap_reachable", return_value=True), \
+             patch.object(main, "imap_authenticated", return_value=True):
+            main.STATS["last_reconcile_error"] = "UpstreamError"
+            response = self.client.get("/healthz")
+            self.assertEqual(response.status_code, 503)
+            self.assertTrue(response.json()["detail"]["imap_ok"])
+            self.assertFalse(response.json()["detail"]["reconcile_ok"])
+            main.STATS["last_reconcile_error"] = None
+            main.STATS["last_reconcile_attempt_at"] = 1
+            self.assertEqual(self.client.get("/healthz").status_code, 503)
+
+    def test_partial_sweep_does_not_report_success(self):
+        class Page:
+            def json(self):
+                return {"data": [{"id": "unavailable", "to": ["support@example.com"]}]}
+        with patch.object(main, "_get", return_value=Page()), \
+             patch.object(main, "fetch_message", side_effect=OSError("failed")):
+            main.reconcile_once()
+        self.assertIsNone(main.STATS["last_reconcile_at"])
+        self.assertEqual(main.STATS["reconcile_failures"], 1)
+
+    def test_http_failure_diagnostics_omit_request_url(self):
+        import requests
+        response = requests.Response()
+        response.status_code = 403
+        response.url = "https://storage.example?signature=PRIVATE-TOKEN"
+        with patch.object(main.requests, "get", return_value=response), patch.object(main.time, "sleep"):
+            with self.assertRaises(RuntimeError) as error:
+                main._get(response.url)
+        self.assertNotIn("PRIVATE-TOKEN", str(error.exception))
 
 
 if __name__ == "__main__":

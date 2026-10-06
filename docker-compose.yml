@@ -118,7 +118,7 @@ services:
       - maildata:/srv/mail
     # Do NOT add `user:` here. The entrypoint needs root to chown the Maildir
     # and let Dovecot bind 143 before dropping to uid 1000.
-    # The image ships its own HEALTHCHECK; it fails if Dovecot stops answering.
+    # HEALTHCHECK validates every IMAP login and the reconciler's progress.
 
   # ---------------------------------------------------------------- data
   db:

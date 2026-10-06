@@ -102,6 +102,12 @@ in Resend — receiving and sending are separate domain configs.
 
 ## Development
 
+`/healthz` returns 503 if any configured account cannot authenticate to IMAP,
+or if the enabled reconciler fails or stops making progress. `imap_ok` and
+`reconcile_ok` identify the failing component. `last_reconcile_attempt_at` tracks
+attempts; `last_reconcile_at` records successful sweeps. Diagnostics expose error
+types and HTTP status codes, never signed download URLs or exception contents.
+
 ```bash
 pip install -r tests/requirements.txt
 python tests/test_bridge.py     # webhook, passthrough, dedupe, reconciler, healthz

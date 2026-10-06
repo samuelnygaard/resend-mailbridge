@@ -64,6 +64,7 @@ os.environ.update(
     RESEND_WEBHOOK_SECRET=SECRET, MAILBRIDGE_MAILDIR_ROOT=TMP,
     DISABLE_RECONCILER="1", ALLOWED_RECIPIENTS="support@nelgixa.resend.app",
     MAILBRIDGE_IMAP_PORT="14300", MAILBRIDGE_IMAP_USER="support",
+    MAILBRIDGE_IMAP_PASSWORD="bridge-test-password",
 )
 os.environ.pop("MAILDIR", None)
 os.environ.pop("MAILBRIDGE_RECIPIENTS", None)
@@ -146,11 +147,25 @@ detail = r.json()["detail"]
 print("  imap_ok:", detail["imap_ok"], "| delivered:", detail["delivered"])
 assert detail["imap_ok"] is False
 
-print("== 9. healthz goes green once something answers on the IMAP port ==")
+print("== 9. healthz goes green only after successful IMAP authentication ==")
 import socketserver, socket as _s
-class FakeIMAP(socketserver.BaseRequestHandler):
+class FakeIMAP(socketserver.StreamRequestHandler):
     def handle(self):
-        self.request.sendall(b"* OK [CAPABILITY IMAP4rev1] Dovecot ready.\r\n")
+        self.wfile.write(b"* OK [CAPABILITY IMAP4rev1] Dovecot ready.\r\n")
+        try:
+            while line := self.rfile.readline():
+                tag, command, *_ = line.split()
+                if command.upper() == b"CAPABILITY":
+                    self.wfile.write(b"* CAPABILITY IMAP4rev1\r\n" + tag + b" OK capabilities\r\n")
+                elif command.upper() == b"LOGIN" and b'bridge-test-password' in line and b'support' in line:
+                    self.wfile.write(tag + b" OK logged in\r\n")
+                elif command.upper() == b"LOGOUT":
+                    self.wfile.write(b"* BYE closing\r\n" + tag + b" OK logout\r\n")
+                    return
+                else:
+                    self.wfile.write(tag + b" NO authentication failed\r\n")
+        except ConnectionResetError:
+            pass
 class Srv(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 imap_srv = Srv(("127.0.0.1", main.IMAP_PORT_TEST if hasattr(main,"IMAP_PORT_TEST") else main.IMAP_PORT), FakeIMAP)

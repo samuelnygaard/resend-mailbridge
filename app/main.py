@@ -13,6 +13,7 @@ and attributes contacts exactly as it would against a real mailbox.
 
 import email.utils
 import json
+import imaplib
 import logging
 import os
 import pathlib
@@ -130,10 +131,13 @@ def maildir_for(mailbox: str) -> pathlib.Path:
     return MAILDIR_ROOT / mailbox
 
 IMAP_PORT = int(os.environ.get("MAILBRIDGE_IMAP_PORT", "143"))
+IMAP_PASSWORD = os.environ.get("MAILBRIDGE_IMAP_PASSWORD", "")
 RECONCILE_INTERVAL = int(os.environ.get("RECONCILE_INTERVAL", "300"))
 RECONCILE_LIMIT = int(os.environ.get("RECONCILE_LIMIT", "100"))
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "30"))
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "180"))
+RECONCILER_ENABLED = os.environ.get("DISABLE_RECONCILER") != "1"
+STARTED_AT = time.time()
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -154,8 +158,28 @@ STATS = {
     "last_delivery_at": None,
     "last_error": None,
     "last_reconcile_at": None,
+    "last_reconcile_attempt_at": None,
+    "last_reconcile_error": None,
+    "reconcile_failures": 0,
     "per_mailbox": {},
 }
+
+
+def safe_error(exc: Exception) -> str:
+    """Public diagnostics must never contain exception URLs or credentials."""
+    if isinstance(exc, UpstreamError):
+        return str(exc)
+    return type(exc).__name__
+
+
+def record_error(exc: Exception) -> None:
+    STATS["errors"] += 1
+    STATS["last_error"] = safe_error(exc)
+
+
+class UpstreamError(RuntimeError):
+    def __init__(self, status: Optional[int]):
+        super().__init__(f"upstream HTTP {status}" if status else "upstream transport failure")
 
 # ---------------------------------------------------------------- maildir
 
@@ -217,19 +241,17 @@ def deliver(raw: bytes, email_id: str, mailbox: str) -> bool:
 
 def _get(url: str, **kw) -> requests.Response:
     timeout = kw.pop("timeout", HTTP_TIMEOUT)
-    last: Optional[Exception] = None
+    status = None
     for attempt in range(3):
         try:
             resp = requests.get(url, timeout=timeout, **kw)
-            if resp.status_code >= 500:
-                raise RuntimeError(f"upstream {resp.status_code}")
+            status = resp.status_code
             resp.raise_for_status()
             return resp
-        except Exception as exc:  # noqa: BLE001 - retry any transport error
-            last = exc
+        except requests.RequestException:
             if attempt < 2:
                 time.sleep(2 ** attempt)
-    raise RuntimeError(f"GET failed after retries: {url}") from last
+    raise UpstreamError(status) from None
 
 
 def fetch_metadata(email_id: str) -> dict:
@@ -366,9 +388,8 @@ async def webhook(request: Request):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        STATS["errors"] += 1
-        STATS["last_error"] = f"{type(exc).__name__}: {exc}"
-        log.exception("ingest failed for %s", email_id)
+        record_error(exc)
+        log.error("ingest failed for %s: %s", email_id, safe_error(exc))
         # 500 makes Resend retry on its own schedule; the reconciler is the
         # second safety net. Never swallow this.
         raise HTTPException(status_code=500, detail="ingest failed") from exc
@@ -384,14 +405,46 @@ def imap_reachable() -> bool:
         return False
 
 
+def imap_authenticated() -> bool:
+    if not IMAP_PASSWORD:
+        return False
+    deadline = time.monotonic() + 3
+    try:
+        for box in MAILBOXES:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            with imaplib.IMAP4("127.0.0.1", IMAP_PORT, timeout=remaining) as client:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                client.sock.settimeout(remaining)
+                if client.login(box, IMAP_PASSWORD)[0] != "OK":
+                    return False
+        return True
+    except (OSError, imaplib.IMAP4.error):
+        return False
+
+
+def reconciler_healthy() -> bool:
+    if not RECONCILER_ENABLED:
+        return True
+    last_attempt = STATS["last_reconcile_attempt_at"] or STARTED_AT
+    return (STATS["last_reconcile_error"] is None
+            and time.time() - last_attempt < max(60, RECONCILE_INTERVAL * 2))
+
+
 @app.get("/healthz")
 def healthz():
     ensure_maildir()
-    imap_ok = imap_reachable()
+    imap_ok = imap_reachable() and imap_authenticated()
+    reconcile_ok = reconciler_healthy()
     unread = {box: len(list((maildir_for(box) / "new").iterdir())) for box in MAILBOXES}
     body = {
-        "ok": imap_ok,
+        "ok": imap_ok and reconcile_ok,
         "imap_ok": imap_ok,
+        "reconcile_enabled": RECONCILER_ENABLED,
+        "reconcile_ok": reconcile_ok,
         "maildir_root": str(MAILDIR_ROOT),
         "mailboxes": MAILBOXES,
         "routes": {a: m for a, m in ROUTES},
@@ -400,7 +453,7 @@ def healthz():
         "unread_total": sum(unread.values()),
         **STATS,
     }
-    if not imap_ok:
+    if not body["ok"]:
         raise HTTPException(status_code=503, detail=body)
     return body
 
@@ -408,11 +461,12 @@ def healthz():
 # ---------------------------------------------------------------- reconciler
 
 
-def reconcile_once() -> None:
+def _reconcile_sweep() -> bool:
     payload = _get(
         f"{API_BASE}/emails/receiving", headers=HEADERS,
         params={"limit": RECONCILE_LIMIT},
     ).json()
+    succeeded = True
     for item in payload.get("data") or payload.get("emails") or []:
         email_id = item.get("id") or item.get("email_id")
         if not email_id:
@@ -420,10 +474,28 @@ def reconcile_once() -> None:
         try:
             ingest(email_id, hint=item)
         except Exception as exc:  # noqa: BLE001
-            STATS["errors"] += 1
-            STATS["last_error"] = f"{type(exc).__name__}: {exc}"
-            log.exception("reconcile failed for %s", email_id)
-    STATS["last_reconcile_at"] = time.time()
+            succeeded = False
+            record_error(exc)
+            STATS["last_reconcile_error"] = safe_error(exc)
+            log.error("reconcile failed for %s: %s", email_id, safe_error(exc))
+    return succeeded
+
+
+def reconcile_once() -> None:
+    STATS["last_reconcile_attempt_at"] = time.time()
+    try:
+        succeeded = _reconcile_sweep()
+    except Exception as exc:
+        record_error(exc)
+        STATS["last_reconcile_error"] = safe_error(exc)
+        STATS["reconcile_failures"] += 1
+        raise
+    if succeeded:
+        STATS["last_reconcile_error"] = None
+        STATS["last_reconcile_at"] = time.time()
+        STATS["reconcile_failures"] = 0
+    else:
+        STATS["reconcile_failures"] += 1
 
 
 def reconcile_loop() -> None:
@@ -434,8 +506,8 @@ def reconcile_loop() -> None:
     while True:
         try:
             reconcile_once()
-        except Exception:  # noqa: BLE001
-            log.exception("reconcile sweep failed")
+        except Exception as exc:  # noqa: BLE001
+            log.error("reconcile sweep failed: %s", safe_error(exc))
         time.sleep(RECONCILE_INTERVAL)
 
 
@@ -452,5 +524,5 @@ def _startup() -> None:
         "mailbridge up - root=%s mailboxes=%s reconcile=%ss",
         MAILDIR_ROOT, ",".join(MAILBOXES), RECONCILE_INTERVAL,
     )
-    if os.environ.get("DISABLE_RECONCILER") != "1":
+    if RECONCILER_ENABLED:
         threading.Thread(target=reconcile_loop, daemon=True, name="reconciler").start()

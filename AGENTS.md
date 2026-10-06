@@ -33,6 +33,10 @@ never touch the bridge.
 | Reconciler pagination | ❌ not implemented (fetches newest `RECONCILE_LIMIT` only) |
 | Monitoring / alerting | ❌ none. `/healthz` exposes the data; nothing consumes it yet |
 
+`/healthz` authenticates every mailbox and separately reports reconciler health.
+Failed or stalled recovery makes it return 503 even when IMAP works. Public
+errors contain only safe error types/status codes, never signed URLs.
+
 ## Layout
 
 ```

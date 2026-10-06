@@ -354,16 +354,15 @@ def ingest(email_id: str, hint: Optional[dict] = None) -> None:
 
 @app.post("/webhook")
 async def webhook(request: Request):
+    if not WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="webhook signing is not configured")
     body = await request.body()
 
-    if WEBHOOK_SECRET:
-        try:
-            Webhook(WEBHOOK_SECRET).verify(body, dict(request.headers))
-        except WebhookVerificationError:
-            log.warning("rejected webhook with bad signature")
-            raise HTTPException(status_code=401, detail="invalid signature")
-    else:
-        log.warning("RESEND_WEBHOOK_SECRET unset - signature NOT verified")
+    try:
+        Webhook(WEBHOOK_SECRET).verify(body, dict(request.headers))
+    except WebhookVerificationError:
+        log.warning("rejected webhook with bad signature")
+        raise HTTPException(status_code=401, detail="invalid signature")
 
     # Svix 2.x verifies signatures without returning the parsed JSON event.
     try:
@@ -445,6 +444,7 @@ def healthz():
         "imap_ok": imap_ok,
         "reconcile_enabled": RECONCILER_ENABLED,
         "reconcile_ok": reconcile_ok,
+        "webhook_enabled": bool(WEBHOOK_SECRET),
         "maildir_root": str(MAILDIR_ROOT),
         "mailboxes": MAILBOXES,
         "routes": {a: m for a, m in ROUTES},

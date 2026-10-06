@@ -57,6 +57,20 @@ class BridgeTest(unittest.TestCase):
 
 
 class SignedWebhookTests(BridgeTest):
+    def test_bootstrap_without_signing_secret_rejects_ingestion(self):
+        with patch.object(main, "WEBHOOK_SECRET", ""), \
+             patch.object(main, "fetch_message", return_value=b"Subject: unsigned\r\n\r\nbody\r\n"):
+            response = self.client.post("/webhook", json={"type": "email.received", "data": {
+                "email_id": "unsigned", "to": ["support@example.com"],
+            }})
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(list((self.root / "support/new").iterdir()), [])
+            with patch.object(main, "imap_reachable", return_value=True), \
+                 patch.object(main, "imap_authenticated", return_value=True):
+                health = self.client.get("/healthz")
+            self.assertEqual(health.status_code, 200)
+            self.assertFalse(health.json()["webhook_enabled"])
+
     def test_verified_event_is_parsed_independently_of_verifier_return(self):
         # Svix 2.x returns None. Keep signature verification real.
         response = self.signed_post({"type": "domain.created", "data": {}})

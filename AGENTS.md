@@ -55,6 +55,7 @@ tests/               standalone scripts against a mock Resend API
 
 1. Resend POSTs `email.received` (metadata only) to `/webhook`.
 2. Signature verified with svix (`RESEND_WEBHOOK_SECRET`).
+   Without a secret, reject ingestion with 503; keep bootstrap/IMAP running.
 3. Recipient matched against `MAILBRIDGE_RECIPIENTS` → local-part mailbox name,
    or legacy `MAILBRIDGE_ROUTES` → explicit mailbox name; unmatched mail dropped.
 4. `GET /emails/receiving/{id}` → `raw.download_url` → original `.eml` bytes.
@@ -109,7 +110,8 @@ tests/               standalone scripts against a mock Resend API
   existing Maildir mail is ignored. Use `720h` for first sync.
 - **Libredesk TLS dropdown says `OFF`**, not "None", for plaintext IMAP.
 - **Webhook secret chicken-and-egg**: it only exists after the endpoint is
-  live, so the compose makes it optional (`:-`). Fill it in right after.
+  live, so the compose makes it optional (`:-`). Without it, /webhook returns
+  503; /healthz exposes `webhook_enabled=false`. Fill it in and redeploy.
 
 ## Running locally
 

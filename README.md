@@ -27,7 +27,8 @@ Libredesk threads replies correctly.
 3. Assign domains: `app` → `https://support.ambolt.io:9000`, `mailbridge` → `https://hooks.ambolt.io:8080`.
 4. Deploy. Check `curl https://hooks.ambolt.io/healthz` → 200, `"imap_ok": true`.
 5. Resend → Webhooks → `https://hooks.ambolt.io/webhook`, event `email.received`.
-   Put the signing secret in `RESEND_WEBHOOK_SECRET`, redeploy.
+   Put the signing secret in `RESEND_WEBHOOK_SECRET`, redeploy. Until then,
+   `/webhook` returns 503 and accepts no messages; IMAP and API recovery work.
 6. In Libredesk, add one email inbox **per mailbox** (see below).
 
 Set accepted recipient addresses without configuring IMAP usernames:
@@ -53,7 +54,7 @@ startup; use explicit `MAILBRIDGE_ROUTES` for intentional shared/custom mappings
 | Variable | Required | Default | Notes |
 |---|---|---|---|
 | `RESEND_API_KEY` | yes | — | Container exits if unset |
-| `RESEND_WEBHOOK_SECRET` | strongly | — | Unset ⇒ signatures not verified |
+| `RESEND_WEBHOOK_SECRET` | yes for webhooks | — | Unset ⇒ webhook requests rejected with 503; bootstrap stays running |
 | `MAILBRIDGE_IMAP_PASSWORD` | yes | — | Shared by all mailboxes. In Coolify: `${SERVICE_PASSWORD_MAILBRIDGEIMAP}` |
 | `MAILBRIDGE_RECIPIENTS` | yes in supplied Compose | — | Accepted addresses, comma-separated; usernames derive from local parts |
 | `MAILBRIDGE_ROUTES` | no | — | Legacy/custom `addr=mailbox` mappings; cannot combine with `MAILBRIDGE_RECIPIENTS` |

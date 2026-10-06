@@ -87,8 +87,8 @@ services:
       - RESEND_API_KEY=${RESEND_API_KEY:?}
       # Optional at the compose level ONLY so the first deploy can succeed —
       # you cannot obtain the secret until the endpoint exists. Fill it in and
-      # redeploy immediately. While empty, signatures are NOT verified and the
-      # container logs a warning on every request.
+      # redeploy. While empty, /webhook rejects every request with 503; IMAP and
+      # API recovery remain available and /healthz reports webhook_enabled=false.
       - RESEND_WEBHOOK_SECRET=${RESEND_WEBHOOK_SECRET:-}
       # --- Routing ---
       # Accepted addresses only: support@ -> support, sales@ -> sales.

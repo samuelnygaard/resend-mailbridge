@@ -22,8 +22,8 @@ if [ -z "${RESEND_API_KEY:-}" ]; then
 fi
 
 if [ -z "${RESEND_WEBHOOK_SECRET:-}" ]; then
-  echo "WARNING: RESEND_WEBHOOK_SECRET is not set - webhook signatures will NOT" >&2
-  echo "         be verified. Anyone who finds the URL can inject tickets." >&2
+  echo "WARNING: RESEND_WEBHOOK_SECRET is not set - /webhook returns 503 until" >&2
+  echo "         signing is configured. IMAP and recovery remain available." >&2
 fi
 
 # Use the same recipient-derived accounts and legacy mappings as the service.

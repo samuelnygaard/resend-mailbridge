@@ -20,6 +20,10 @@ The bridge passes Resend's **original message bytes** through untouched, so
 `Message-ID`, `In-Reply-To`, attachments and encoded subjects survive and
 Libredesk threads replies correctly.
 
+Webhook and recovery deliveries of the same email are serialized across
+mailboxes in the single Uvicorn process. Unique temporary files are removed on
+failure; retries check both `new/` and Dovecot's renamed files in `cur/`.
+
 ## Quick start (Coolify)
 
 1. New → **Docker Compose Empty**, paste [`docker-compose.yml`](docker-compose.yml).

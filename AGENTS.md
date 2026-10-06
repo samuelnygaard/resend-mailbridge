@@ -73,6 +73,9 @@ tests/               standalone scripts against a mock Resend API
   (`<ts>.<email_id>.<host>`). This is the entire dedupe mechanism — retries,
   replays and the reconciler converge on one path. Dedupe must check both
   `new/` and `cur/` (Dovecot renames to `cur/NAME:2,S` once read).
+  Serialize ingest/delivery by ID in the single service process; use unique
+  temporary files and clean them on failure. Keep Uvicorn at one process unless
+  cross-process locking is added. Email IDs must be safe filename components.
 - **Ingest failures return HTTP 500.** That triggers Resend's retries.
   Never swallow the exception.
 - **The signed `download_url` must not get an `Authorization` header.**

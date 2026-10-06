@@ -12,6 +12,7 @@ and attributes contacts exactly as it would against a real mailbox.
 """
 
 import email.utils
+import copy
 import json
 import imaplib
 import logging
@@ -20,6 +21,7 @@ import pathlib
 import re
 import socket
 import threading
+import tempfile
 import time
 from email.message import EmailMessage
 from typing import Optional
@@ -149,6 +151,16 @@ HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 HOSTNAME = socket.gethostname().replace("/", "_").replace(":", "_")
 
 app = FastAPI(title="mailbridge")
+STATS_LOCK = threading.Lock()
+# Bounded lock storage. The same email ID always uses the same reentrant lock,
+# including nested ingest -> deliver calls and different mailbox destinations.
+EMAIL_LOCKS = tuple(threading.RLock() for _ in range(64))
+
+
+def email_lock(email_id: str):
+    if not isinstance(email_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", email_id):
+        raise ValueError("invalid email_id")
+    return EMAIL_LOCKS[hash(email_id) % len(EMAIL_LOCKS)]
 
 STATS = {
     "delivered": 0,
@@ -173,8 +185,9 @@ def safe_error(exc: Exception) -> str:
 
 
 def record_error(exc: Exception) -> None:
-    STATS["errors"] += 1
-    STATS["last_error"] = safe_error(exc)
+    with STATS_LOCK:
+        STATS["errors"] += 1
+        STATS["last_error"] = safe_error(exc)
 
 
 class UpstreamError(RuntimeError):
@@ -194,6 +207,7 @@ def ensure_maildir(mailbox: Optional[str] = None) -> None:
 def already_delivered(email_id: str, mailbox: str) -> bool:
     """Dovecot renames new/NAME to cur/NAME:2,S once a client reads it,
     so both directories must be checked."""
+    email_lock(email_id)  # Validate IDs before using them as a glob or path.
     root = maildir_for(mailbox)
     for sub in ("new", "cur"):
         if any((root / sub).glob(f"*.{email_id}.*")):
@@ -206,6 +220,11 @@ def delivered_anywhere(email_id: str) -> bool:
 
 
 def deliver(raw: bytes, email_id: str, mailbox: str) -> bool:
+    with email_lock(email_id):
+        return _deliver(raw, email_id, mailbox)
+
+
+def _deliver(raw: bytes, email_id: str, mailbox: str) -> bool:
     """Atomic Maildir delivery.
 
     The Resend email id becomes the unique part of the filename, so
@@ -213,25 +232,32 @@ def deliver(raw: bytes, email_id: str, mailbox: str) -> bool:
     retries, dashboard replays and the reconciler all converge on one path.
     """
     ensure_maildir(mailbox)
-    if already_delivered(email_id, mailbox):
-        STATS["skipped_duplicate"] += 1
+    if delivered_anywhere(email_id):
+        with STATS_LOCK:
+            STATS["skipped_duplicate"] += 1
         log.debug("already delivered, skipping %s", email_id)
         return False
 
     root = maildir_for(mailbox)
     name = f"{int(time.time())}.{email_id}.{HOSTNAME}"
-    tmp_path = root / "tmp" / name
     new_path = root / "new" / name
 
-    with open(tmp_path, "wb") as fh:
-        fh.write(raw)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.rename(tmp_path, new_path)  # atomic within one filesystem
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=root / "tmp", prefix=name + ".", delete=False) as fh:
+            tmp_path = pathlib.Path(fh.name)
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.rename(tmp_path, new_path)  # atomic within one filesystem
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
-    STATS["delivered"] += 1
-    STATS["per_mailbox"][mailbox] = STATS["per_mailbox"].get(mailbox, 0) + 1
-    STATS["last_delivery_at"] = time.time()
+    with STATS_LOCK:
+        STATS["delivered"] += 1
+        STATS["per_mailbox"][mailbox] = STATS["per_mailbox"].get(mailbox, 0) + 1
+        STATS["last_delivery_at"] = time.time()
     log.info("delivered %s -> %s (%d bytes)", email_id, mailbox, len(raw))
     return True
 
@@ -328,6 +354,11 @@ def mailbox_for(payload: dict) -> Optional[str]:
 
 
 def ingest(email_id: str, hint: Optional[dict] = None) -> None:
+    with email_lock(email_id):
+        _ingest(email_id, hint)
+
+
+def _ingest(email_id: str, hint: Optional[dict] = None) -> None:
     if delivered_anywhere(email_id):
         return
 
@@ -339,7 +370,8 @@ def ingest(email_id: str, hint: Optional[dict] = None) -> None:
 
     mailbox = mailbox_for(payload)
     if not mailbox:
-        STATS["skipped_recipient"] += 1
+        with STATS_LOCK:
+            STATS["skipped_recipient"] += 1
         log.info(
             "no route for %s (recipients=%s), skipping",
             email_id, recipients_of(payload) or "none",
@@ -381,6 +413,10 @@ async def webhook(request: Request):
     email_id = data.get("email_id") or data.get("id")
     if not email_id:
         raise HTTPException(status_code=400, detail="missing email_id")
+    try:
+        email_lock(email_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid email_id") from None
 
     try:
         ingest(email_id, hint=data)
@@ -439,6 +475,8 @@ def healthz():
     imap_ok = imap_reachable() and imap_authenticated()
     reconcile_ok = reconciler_healthy()
     unread = {box: len(list((maildir_for(box) / "new").iterdir())) for box in MAILBOXES}
+    with STATS_LOCK:
+        stats = copy.deepcopy(STATS)
     body = {
         "ok": imap_ok and reconcile_ok,
         "imap_ok": imap_ok,
@@ -451,7 +489,7 @@ def healthz():
         "default_mailbox": DEFAULT_MAILBOX or None,
         "unread_in_new": unread,
         "unread_total": sum(unread.values()),
-        **STATS,
+        **stats,
     }
     if not body["ok"]:
         raise HTTPException(status_code=503, detail=body)

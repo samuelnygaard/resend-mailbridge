@@ -10,6 +10,8 @@ import sys
 import tempfile
 import socketserver
 import threading
+import concurrent.futures
+import time
 import unittest
 from unittest.mock import patch
 
@@ -171,6 +173,58 @@ class HealthTests(BridgeTest):
             with self.assertRaises(RuntimeError) as error:
                 main._get(response.url)
         self.assertNotIn("PRIVATE-TOKEN", str(error.exception))
+
+
+class DeliveryTests(BridgeTest):
+    def test_concurrent_delivery_has_one_copy_across_mailboxes(self):
+        entered = threading.Event()
+        second_fsync = threading.Event()
+        release = threading.Event()
+        real_fsync = os.fsync
+        count = 0
+        count_lock = threading.Lock()
+
+        def slow_fsync(fd):
+            nonlocal count
+            with count_lock:
+                count += 1
+                first = count == 1
+            if first:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("test did not release write")
+            else:
+                second_fsync.set()
+            return real_fsync(fd)
+
+        with patch.object(main.os, "fsync", side_effect=slow_fsync), \
+             concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(main.deliver, b"original bytes", "concurrent-id", "support")
+            self.assertTrue(entered.wait(1))
+            second = pool.submit(main.deliver, b"original bytes", "concurrent-id", "sales")
+            # Without serialization the second write reaches fsync before the first publishes.
+            second_fsync.wait(0.2)
+            release.set()
+            results = [first.result(timeout=2), second.result(timeout=2)]
+        files = list(self.root.glob("*/new/*"))
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].read_bytes(), b"original bytes")
+        self.assertEqual(sorted(results), [False, True])
+        self.assertEqual(list(self.root.glob("*/tmp/*")), [])
+
+    def test_failed_delivery_cleans_temporary_file_and_can_retry(self):
+        with patch.object(main.os, "fsync", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError):
+                main.deliver(b"original bytes", "retry-id", "support")
+        self.assertEqual(list(self.root.glob("*/tmp/*")), [])
+        self.assertEqual(list(self.root.glob("*/new/*")), [])
+        self.assertTrue(main.deliver(b"original bytes", "retry-id", "support"))
+
+    def test_email_id_cannot_escape_or_match_other_messages(self):
+        main.deliver(b"existing", "existing-id", "support")
+        for email_id in ("../../escape", "*", "id/path", "", None):
+            with self.subTest(email_id=email_id), self.assertRaises(ValueError):
+                main.deliver(b"unsafe", email_id, "support")
 
 
 if __name__ == "__main__":

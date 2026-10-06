@@ -102,11 +102,12 @@ in Resend — receiving and sending are separate domain configs.
 ## Development
 
 ```bash
-pip install -r app/requirements.txt httpx
+pip install -r tests/requirements.txt
 python tests/test_bridge.py     # webhook, passthrough, dedupe, reconciler, healthz
 python tests/test_routes.py     # multi-mailbox routing
 python tests/test_routes.py --auto  # routing with recipient-derived usernames
 python tests/test_auto_mailboxes.py # configuration boundaries and compatibility
+python tests/test_reliability.py   # security and recovery regressions
 sh -n entrypoint.sh
 ```
 

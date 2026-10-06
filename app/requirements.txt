@@ -1,5 +1,6 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-requests>=2.32
-svix>=1.40
-supervisor>=4.2
+# Direct runtime dependencies, pinned to the versions exercised by CI and Docker.
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+requests==2.34.2
+svix==2.6.2
+supervisor==4.3.0

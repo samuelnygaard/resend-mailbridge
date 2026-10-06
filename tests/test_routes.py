@@ -53,7 +53,7 @@ import sys
 AUTO = "--auto" in sys.argv
 if AUTO:
     os.environ.pop("MAILBRIDGE_ROUTES")
-    os.environ["MAILBRIDGE_RECIPIENTS"] = "support@example.resend.app,sales@example.resend.app"
+    os.environ["MAILBRIDGE_RECIPIENTS"] = "support@nelgixa.resend.app,sales@nelgixa.resend.app"
 sys.path.insert(0,APP_DIR); import main
 from fastapi.testclient import TestClient
 from svix.webhooks import Webhook

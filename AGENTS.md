@@ -108,11 +108,12 @@ tests/               standalone scripts against a mock Resend API
 ## Running locally
 
 ```bash
-pip install -r app/requirements.txt httpx
+pip install -r tests/requirements.txt
 python tests/test_bridge.py
 python tests/test_routes.py
 python tests/test_routes.py --auto
 python tests/test_auto_mailboxes.py
+python tests/test_reliability.py
 sh -n entrypoint.sh
 ```
 

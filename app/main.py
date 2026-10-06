@@ -344,12 +344,19 @@ async def webhook(request: Request):
         log.warning("RESEND_WEBHOOK_SECRET unset - signature NOT verified")
 
     # Svix 2.x verifies signatures without returning the parsed JSON event.
-    event = json.loads(body)
+    try:
+        event = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="invalid JSON") from None
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=400, detail="event must be an object")
 
     if event.get("type") != "email.received":
         return {"ok": True, "ignored": event.get("type")}
 
-    data = event.get("data") or {}
+    data = event.get("data")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="data must be an object")
     email_id = data.get("email_id") or data.get("id")
     if not email_id:
         raise HTTPException(status_code=400, detail="missing email_id")

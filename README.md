@@ -119,6 +119,11 @@ types and HTTP status codes, never signed download URLs or exception contents.
 Each health check logs into every mailbox and logs out cleanly. Dovecot's
 periodic local login/logout messages are expected; health checks do not open
 an additional connection that closes partway through the IMAP greeting.
+The Compose `mailbridge.healthcheck` calls this endpoint every 30 seconds, with
+a 25-second startup grace period and five retries before marking it unhealthy.
+It uses the image's Python runtime and overrides the built-in image health
+check with the same timings. Docker health status alone does not restart the
+container; `restart: unless-stopped` applies when the process exits.
 
 ```bash
 pip install -r tests/requirements.txt

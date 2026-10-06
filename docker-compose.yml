@@ -119,6 +119,20 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - maildata:/srv/mail
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import os, sys, urllib.request;
+          port = os.environ.get('MAILBRIDGE_HTTP_PORT', '8080');
+          response = urllib.request.urlopen('http://127.0.0.1:' + port + '/healthz', timeout=5);
+          sys.exit(0 if response.status == 200 else 1)
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 25s
     # Do NOT add `user:` here. The entrypoint needs root to chown the Maildir
     # and let Dovecot bind 143 before dropping to uid 1000.
     # HEALTHCHECK validates every IMAP login and the reconciler's progress.

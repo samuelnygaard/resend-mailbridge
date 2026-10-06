@@ -1,0 +1,149 @@
+# ==============================================================================
+#  Libredesk + mailbridge  —  Coolify "Docker Compose Empty" resource
+# ==============================================================================
+#
+#  support@example.com --(Workspace forward)--> support@nelgixa.resend.app
+#     -> Resend receives + stores
+#     -> email.received webhook       -> mailbridge :8080
+#     -> downloads the original .eml  -> Maildir
+#     -> Dovecot :143 (internal only) -> Libredesk polls -> ticket
+#     -> replies leave via Resend SMTP
+#
+#  ASSIGN DOMAINS to exactly two services in Coolify:
+#     app         ->  https://support.ambolt.io:9000
+#     mailbridge  ->  https://hooks.ambolt.io:8080
+#
+#  The ":port" suffix tells Coolify which container port to route to. It does
+#  NOT appear in the public URL. Create both DNS A records BEFORE deploying so
+#  Let's Encrypt succeeds on the first attempt.
+#
+#  Everything else stays on the internal Docker network. Port 143 is never
+#  published, which is why plaintext IMAP is fine.
+# ==============================================================================
+
+services:
+
+  # ---------------------------------------------------------------- Libredesk
+  app:
+    image: libredesk/libredesk:latest
+    restart: unless-stopped
+    environment:
+      # Coolify generates this once and keeps it stable.
+      # WARNING: changing it makes existing encrypted values unreadable.
+      - LIBREDESK_APP__ENCRYPTION_KEY=${SERVICE_HEX_32_LIBREDESK}
+      - LIBREDESK_APP__ENV=prod
+      - LIBREDESK_APP__LOG_LEVEL=info
+      - LIBREDESK_APP__SERVER__ADDRESS=0.0.0.0:9000
+      # Leave false — Coolify terminates TLS, so cookies are served over HTTPS.
+      - LIBREDESK_APP__SERVER__DISABLE_SECURE_COOKIES=false
+      - LIBREDESK_APP__SERVER__SESSION_LIFETIME=9h
+      - LIBREDESK_DB__HOST=db
+      - LIBREDESK_DB__PORT=5432
+      - LIBREDESK_DB__USER=${POSTGRES_USER:-libredesk}
+      - LIBREDESK_DB__PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - LIBREDESK_DB__DATABASE=${POSTGRES_DB:-libredesk}
+      - LIBREDESK_DB__SSL_MODE=disable
+      - LIBREDESK_REDIS__ADDRESS=redis:6379
+      - LIBREDESK_REDIS__DB=0
+      - LIBREDESK_UPLOAD__PROVIDER=fs
+      - LIBREDESK_UPLOAD__FS__UPLOAD_PATH=/libredesk/uploads
+      # First-run admin password. Must pass Libredesk's strength check.
+      - LIBREDESK_SYSTEM_USER_PASSWORD=${LIBREDESK_SYSTEM_USER_PASSWORD:?}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - type: bind
+        source: ./uploads
+        target: /libredesk/uploads
+        is_directory: true
+    # No --config flag on purpose. The image ships a config.toml holding
+    # defaults that Libredesk panics without (db.max_open is read before
+    # --install even runs). LIBREDESK_* vars load after it and override.
+    command:
+      - sh
+      - -c
+      - >
+        mkdir -p /libredesk/uploads &&
+        ./libredesk --install --idempotent-install --yes &&
+        ./libredesk --upgrade --yes &&
+        ./libredesk
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # ---------------------------------------------------------------- mailbridge
+  # Resend inbound webhooks -> Maildir -> Dovecot IMAP, in one image.
+  mailbridge:
+    image: samuelnygaard/mailbridge:latest
+    restart: unless-stopped
+    environment:
+      # --- Resend ---
+      - RESEND_API_KEY=${RESEND_API_KEY:?}
+      # Optional at the compose level ONLY so the first deploy can succeed —
+      # you cannot obtain the secret until the endpoint exists. Fill it in and
+      # redeploy immediately. While empty, signatures are NOT verified and the
+      # container logs a warning on every request.
+      - RESEND_WEBHOOK_SECRET=${RESEND_WEBHOOK_SECRET:-}
+      # --- Routing ---
+      # One mailbox per inbound address. Each mailbox becomes its own IMAP
+      # account, so each gets its own Libredesk inbox with its own From
+      # address — sales replies go out as sales@, not support@.
+      #   MAILBRIDGE_ROUTES=addr=mailbox,addr=mailbox
+      # Order matters: mail addressed to several routes lands in the FIRST
+      # match, producing one ticket rather than two.
+      - MAILBRIDGE_ROUTES=${MAILBRIDGE_ROUTES:?}
+
+      # Where unmatched mail goes. Leave unset to DROP it — which is what you
+      # want, because your Resend domain catches EVERY address at
+      # nelgixa.resend.app, so admin@ and typo-bait would become tickets.
+      - MAILBRIDGE_DEFAULT_MAILBOX=${MAILBRIDGE_DEFAULT_MAILBOX:-}
+
+      # --- Internal IMAP ---
+      # One password shared by every mailbox. Coolify generates and persists
+      # it. Never type it, never commit it. Read the value from the
+      # Environment Variables tab after the first deploy — you need it for
+      # each Libredesk inbox.
+      - MAILBRIDGE_IMAP_PASSWORD=${SERVICE_PASSWORD_MAILBRIDGEIMAP}
+
+      # --- Tuning ---
+      - RECONCILE_INTERVAL=${RECONCILE_INTERVAL:-300}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - maildata:/srv/mail
+    # Do NOT add `user:` here. The entrypoint needs root to chown the Maildir
+    # and let Dovecot bind 143 before dropping to uid 1000.
+    # The image ships its own HEALTHCHECK; it fails if Dovecot stops answering.
+
+  # ---------------------------------------------------------------- data
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-libredesk}
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB=${POSTGRES_DB:-libredesk}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-libredesk} -d ${POSTGRES_DB:-libredesk}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:   # Libredesk database
+  redis-data:      # queues and cache
+  maildata:        # all Maildirs — back this up alongside postgres and uploads

@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+requests>=2.32
+svix>=1.40
+supervisor>=4.2

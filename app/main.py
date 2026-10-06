@@ -136,6 +136,9 @@ IMAP_PORT = int(os.environ.get("MAILBRIDGE_IMAP_PORT", "143"))
 IMAP_PASSWORD = os.environ.get("MAILBRIDGE_IMAP_PASSWORD", "")
 RECONCILE_INTERVAL = int(os.environ.get("RECONCILE_INTERVAL", "300"))
 RECONCILE_LIMIT = int(os.environ.get("RECONCILE_LIMIT", "100"))
+RECONCILE_MAX_PAGES = int(os.environ.get("RECONCILE_MAX_PAGES", "5"))
+if not 1 <= RECONCILE_LIMIT <= 100 or not 2 <= RECONCILE_MAX_PAGES <= 100 or RECONCILE_INTERVAL < 1:
+    raise ValueError("recovery requires limit 1-100, max pages 2-100 and a positive interval")
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "30"))
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "180"))
 RECONCILER_ENABLED = os.environ.get("DISABLE_RECONCILER") != "1"
@@ -173,6 +176,8 @@ STATS = {
     "last_reconcile_attempt_at": None,
     "last_reconcile_error": None,
     "reconcile_failures": 0,
+    "reconcile_pending": 0,
+    "reconcile_cursor": None,
     "per_mailbox": {},
 }
 
@@ -499,24 +504,123 @@ def healthz():
 # ---------------------------------------------------------------- reconciler
 
 
+def load_reconcile_state() -> dict:
+    path = MAILDIR_ROOT / ".reconcile-state.json"
+    if not path.exists():
+        return {"after": None, "pending": {}}
+    if path.stat().st_size > 1_000_000:
+        raise ValueError("recovery state is too large")
+    state = json.loads(path.read_text())
+    if not isinstance(state, dict) or not isinstance(state.get("pending"), dict):
+        raise ValueError("invalid recovery state")
+    if state.get("after") is not None:
+        email_lock(state["after"])
+    if len(state["pending"]) > 1000:
+        raise ValueError("too many pending recovery IDs")
+    for email_id, attempts in state["pending"].items():
+        email_lock(email_id)
+        if not isinstance(attempts, int) or attempts < 1:
+            raise ValueError("invalid retry count")
+    return state
+
+
+def save_reconcile_state(state: dict) -> None:
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=MAILDIR_ROOT,
+                                         prefix=".reconcile-state.", delete=False) as file:
+            tmp = pathlib.Path(file.name)
+            json.dump(state, file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp, MAILDIR_ROOT / ".reconcile-state.json")
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+    STATS["reconcile_pending"] = len(state["pending"])
+    STATS["reconcile_cursor"] = state["after"]
+
+
 def _reconcile_sweep() -> bool:
-    payload = _get(
-        f"{API_BASE}/emails/receiving", headers=HEADERS,
-        params={"limit": RECONCILE_LIMIT},
-    ).json()
+    state = load_reconcile_state()
+    pending = state["pending"]
+    attempted = set()
     succeeded = True
-    for item in payload.get("data") or payload.get("emails") or []:
-        email_id = item.get("id") or item.get("email_id")
-        if not email_id:
-            continue
+
+    def recover(email_id, hint=None):
+        nonlocal succeeded
+        email_lock(email_id)
+        if email_id in attempted:
+            return False
+        attempted.add(email_id)
+        STATS["last_reconcile_attempt_at"] = time.time()
+        attempts = pending.pop(email_id, 0)
         try:
-            ingest(email_id, hint=item)
-        except Exception as exc:  # noqa: BLE001
+            ingest(email_id, hint=hint)
+            return False
+        except Exception as exc:
             succeeded = False
             record_error(exc)
             STATS["last_reconcile_error"] = safe_error(exc)
             log.error("reconcile failed for %s: %s", email_id, safe_error(exc))
-    return succeeded
+            # Bound state growth. If full, retain the page cursor and revisit it.
+            if len(pending) >= 1000:
+                return True
+            pending[email_id] = attempts + 1
+            return False
+        finally:
+            STATS["last_reconcile_attempt_at"] = time.time()
+
+    # Rotate failed IDs so one unavailable message cannot starve other retries.
+    for email_id in list(pending)[:RECONCILE_LIMIT]:
+        recover(email_id)
+    save_reconcile_state(state)
+
+    def page(after):
+        STATS["last_reconcile_attempt_at"] = time.time()
+        params = {"limit": RECONCILE_LIMIT}
+        if after:
+            params["after"] = after
+        payload = _get(f"{API_BASE}/emails/receiving", headers=HEADERS, params=params).json()
+        items = payload.get("data", payload.get("emails", []))
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise ValueError("invalid recovery page")
+        cursor = None
+        if payload.get("has_more"):
+            if not items:
+                raise ValueError("empty recovery page with has_more")
+            cursor = items[-1].get("id") or items[-1].get("email_id")
+            email_lock(cursor)
+            if cursor == after:
+                raise ValueError("recovery cursor did not advance")
+        overflow = False
+        for item in items:
+            email_id = item.get("id") or item.get("email_id")
+            if not email_id:
+                raise ValueError("recovery item has no ID")
+            overflow = recover(email_id, item) or overflow
+        return cursor, overflow
+
+    # Always inspect new arrivals, then resume the durable historical cursor.
+    head_cursor, overflow = page(None)
+    if state["after"] is None and not overflow:
+        state["after"] = head_cursor
+    save_reconcile_state(state)
+    seen = set()
+    for _ in range(RECONCILE_MAX_PAGES - 1):
+        cursor = state["after"]
+        if cursor is None or overflow:
+            break
+        if cursor in seen:
+            raise ValueError("repeated recovery cursor")
+        seen.add(cursor)
+        next_cursor, overflow = page(cursor)
+        if not overflow:
+            state["after"] = next_cursor
+        save_reconcile_state(state)
+    if pending and STATS["last_reconcile_error"] is None:
+        STATS["last_reconcile_error"] = "pending recovery deliveries"
+    return succeeded and not pending
 
 
 def reconcile_once() -> None:

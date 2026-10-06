@@ -30,7 +30,7 @@ never touch the bridge.
 | Dovecot passwd-file config (multi-mailbox) | Container smoke test checks shared-password login and mailbox isolation |
 | End-to-end on real Resend → Libredesk | ⚠️ single mailbox reached boot; full loop + sender attribution not yet confirmed |
 | CI (`.github/workflows/publish.yml`) | ⚠️ written, never run. Needs `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repo secrets |
-| Reconciler pagination | ❌ not implemented (fetches newest `RECONCILE_LIMIT` only) |
+| Reconciler pagination | Bounded cursor sweeps and durable failed-ID retries, tested against a mock API |
 | Monitoring / alerting | ❌ none. `/healthz` exposes the data; nothing consumes it yet |
 
 `/healthz` authenticates every mailbox and separately reports reconciler health.
@@ -125,6 +125,7 @@ python tests/test_routes.py
 python tests/test_routes.py --auto
 python tests/test_auto_mailboxes.py
 python tests/test_reliability.py
+python tests/test_reconcile.py
 sh -n entrypoint.sh
 ```
 
@@ -149,6 +150,5 @@ python tests/test_container.py --image mailbridge:test
 
 ## Ideas / next steps
 
-- Reconciler pagination.
 - Prometheus metrics or an alert when `last_delivery_at` goes stale.
 - Pin `libredesk/libredesk` to a version tag in the compose file.

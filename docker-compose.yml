@@ -113,6 +113,8 @@ services:
 
       # --- Tuning ---
       - RECONCILE_INTERVAL=${RECONCILE_INTERVAL:-300}
+      - RECONCILE_LIMIT=${RECONCILE_LIMIT:-100}
+      - RECONCILE_MAX_PAGES=${RECONCILE_MAX_PAGES:-5}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - maildata:/srv/mail

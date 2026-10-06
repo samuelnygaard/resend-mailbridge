@@ -68,6 +68,7 @@ startup; use explicit `MAILBRIDGE_ROUTES` for intentional shared/custom mappings
 | `MAILBRIDGE_MAILDIR_ROOT` | no | `/srv/mail` | Mount a volume here |
 | `MAILBRIDGE_HTTP_PORT` / `MAILBRIDGE_IMAP_PORT` | no | `8080` / `143` | |
 | `RECONCILE_INTERVAL` / `RECONCILE_LIMIT` | no | `300` / `100` | Recovery sweep |
+| `RECONCILE_MAX_PAGES` | no | `5` | List pages per sweep, 2–100; page size 1–100 |
 | `LOG_LEVEL` | no | `INFO` | |
 
 When migrating from explicit routes, replace `MAILBRIDGE_ROUTES` with
@@ -120,10 +121,19 @@ python tests/test_routes.py     # multi-mailbox routing
 python tests/test_routes.py --auto  # routing with recipient-derived usernames
 python tests/test_auto_mailboxes.py # configuration boundaries and compatibility
 python tests/test_reliability.py   # security and recovery regressions
+python tests/test_reconcile.py     # bounded pagination and durable retries
 sh -n entrypoint.sh
 ```
 
 Tests run against a mock Resend API — no account or network needed. Building:
+
+Recovery follows Resend's `has_more`/`after` pagination. Each sweep checks the
+newest page and resumes older history, up to `RECONCILE_MAX_PAGES` pages. The
+cursor and failed IDs live in `.reconcile-state.json` on the Maildir volume and
+survive restarts. Up to `RECONCILE_LIMIT` failed IDs are retried each sweep;
+successful messages still deduplicate solely against their Maildir filenames.
+The retry list holds up to 1,000 IDs; at capacity a failing page keeps its cursor
+for the next sweep. Health exposes pending count and safe recovery errors.
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 -t samuelnygaard/mailbridge:dev .

@@ -24,6 +24,7 @@ jobs:
       - run: python tests/test_routes.py --auto
       - run: python tests/test_auto_mailboxes.py
       - run: python tests/test_reliability.py
+      - run: python tests/test_reconcile.py
       - run: sh -n entrypoint.sh
       - run: docker build -t mailbridge:test .
       - run: docker run --rm --entrypoint python -v "$PWD:/workspace:ro" -w /workspace mailbridge:test tests/test_entrypoint.py

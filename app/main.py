@@ -467,14 +467,6 @@ async def webhook(request: Request):
     return {"ok": True, "email_id": email_id}
 
 
-def imap_reachable() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", IMAP_PORT), timeout=3) as sock:
-            return sock.recv(4).startswith(b"* OK")
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def imap_authenticated() -> bool:
     if not IMAP_PASSWORD:
         return False
@@ -507,7 +499,9 @@ def reconciler_healthy() -> bool:
 @app.get("/healthz")
 def healthz():
     ensure_maildir()
-    imap_ok = imap_reachable() and imap_authenticated()
+    # IMAP4 reads the greeting, authenticates and sends LOGOUT on context exit.
+    # A separate socket probe closed mid-greeting and generated reset logs.
+    imap_ok = imap_authenticated()
     reconcile_ok = reconciler_healthy()
     unread = {box: len(list((maildir_for(box) / "new").iterdir())) for box in MAILBOXES}
     with STATS_LOCK:

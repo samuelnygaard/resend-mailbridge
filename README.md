@@ -116,6 +116,9 @@ or if the enabled reconciler fails or stops making progress. `imap_ok` and
 `reconcile_ok` identify the failing component. `last_reconcile_attempt_at` tracks
 attempts; `last_reconcile_at` records successful sweeps. Diagnostics expose error
 types and HTTP status codes, never signed download URLs or exception contents.
+Each health check logs into every mailbox and logs out cleanly. Dovecot's
+periodic local login/logout messages are expected; health checks do not open
+an additional connection that closes partway through the IMAP greeting.
 
 ```bash
 pip install -r tests/requirements.txt

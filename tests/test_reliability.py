@@ -67,8 +67,7 @@ class SignedWebhookTests(BridgeTest):
             }})
             self.assertEqual(response.status_code, 503)
             self.assertEqual(list((self.root / "support/new").iterdir()), [])
-            with patch.object(main, "imap_reachable", return_value=True), \
-                 patch.object(main, "imap_authenticated", return_value=True):
+            with patch.object(main, "imap_authenticated", return_value=True):
                 health = self.client.get("/healthz")
             self.assertEqual(health.status_code, 200)
             self.assertFalse(health.json()["webhook_enabled"])
@@ -113,7 +112,57 @@ class RejectingIMAP(socketserver.StreamRequestHandler):
                 self.wfile.write(tag + b" NO authentication failed\r\n")
 
 
+class RecordingIMAP(socketserver.StreamRequestHandler):
+    def handle(self):
+        session = {"commands": [], "user": None}
+        self.server.sessions.append(session)
+        self.wfile.write(b"* OK IMAP ready\r\n")
+        try:
+            while line := self.rfile.readline():
+                tag, command, *args = line.split()
+                command = command.upper()
+                session["commands"].append(command)
+                if command == b"CAPABILITY":
+                    self.wfile.write(b"* CAPABILITY IMAP4rev1\r\n" + tag + b" OK capabilities\r\n")
+                elif command == b"LOGIN":
+                    session["user"] = args[0].strip(b'"').decode()
+                    status = b"NO" if session["user"] == self.server.reject_user else b"OK"
+                    self.wfile.write(tag + b" " + status + b" authentication\r\n")
+                elif command == b"LOGOUT":
+                    self.wfile.write(b"* BYE closing\r\n" + tag + b" OK logout\r\n")
+                    return
+        except ConnectionResetError:
+            return
+
+
 class HealthTests(BridgeTest):
+    def recording_server(self, reject_user=None):
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), RecordingIMAP)
+        server.sessions = []
+        server.reject_user = reject_user
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_health_authenticates_each_account_and_logs_out_without_an_extra_probe(self):
+        server = self.recording_server()
+        with patch.object(main, "IMAP_PORT", server.server_address[1]):
+            response = self.client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(server.sessions), len(main.MAILBOXES))
+        self.assertEqual({session["user"] for session in server.sessions}, set(main.MAILBOXES))
+        for session in server.sessions:
+            self.assertIn(b"LOGIN", session["commands"])
+            self.assertEqual(session["commands"][-1], b"LOGOUT")
+
+    def test_one_unreadable_account_keeps_health_unhealthy(self):
+        server = self.recording_server(reject_user=main.MAILBOXES[-1])
+        with patch.object(main, "IMAP_PORT", server.server_address[1]):
+            response = self.client.get("/healthz")
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.json()["detail"]["imap_ok"])
+
     def test_imap_greeting_without_working_authentication_is_unhealthy(self):
         server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), RejectingIMAP)
         self.addCleanup(server.server_close)
@@ -143,7 +192,6 @@ class HealthTests(BridgeTest):
 
     def test_reconciler_outage_and_stall_are_separate_from_imap(self):
         with patch.object(main, "RECONCILER_ENABLED", True), \
-             patch.object(main, "imap_reachable", return_value=True), \
              patch.object(main, "imap_authenticated", return_value=True):
             main.STATS["last_reconcile_error"] = "UpstreamError"
             response = self.client.get("/healthz")

@@ -120,6 +120,9 @@ def main():
         )
         docker("exec", name, "doveconf", "-n", stdout=subprocess.DEVNULL)
         docker("exec", "-i", name, "python", "-", input=PROBE, text=True)
+        logs = docker("logs", name, capture_output=True, text=True)
+        assert "Connection reset by peer (no auth attempts" not in logs.stdout + logs.stderr
+        print("Health probes leave no unauthenticated connection reset logs: OK")
         # Boot must reject unsafe legacy names before creating any Maildir.
         for route in ["a@example.com=..", "a@example.com=" + "a" * 65]:
             docker(

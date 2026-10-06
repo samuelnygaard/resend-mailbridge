@@ -26,23 +26,21 @@ if [ -z "${RESEND_WEBHOOK_SECRET:-}" ]; then
   echo "         be verified. Anyone who finds the URL can inject tickets." >&2
 fi
 
-# Work out the mailbox list. MAILBRIDGE_ROUTES ("addr=mailbox,addr=mailbox")
-# wins; otherwise fall back to the single MAILBRIDGE_IMAP_USER mailbox.
-MAILBOXES=$(
-  {
-    printf '%s\n' "${MAILBRIDGE_ROUTES:-}" | tr ',' '\n' | sed -n 's/.*=//p'
-    printf '%s\n' "${MAILBRIDGE_DEFAULT_MAILBOX:-}"
-  } | tr -d ' ' | grep -v '^$' | sort -u
-)
-[ -n "${MAILBOXES}" ] || MAILBOXES="${MAILBRIDGE_IMAP_USER}"
+# Use the same recipient-derived accounts and legacy mappings as the service.
+# Parsing happens before any filesystem changes, so invalid config fails safely.
+MAILBOXES=$(python -c 'from main import MAILBOXES; print("\n".join(MAILBOXES))')
 
 for box in ${MAILBOXES}; do
   case "${box}" in
-    *[!a-z0-9._-]*|"")
-      echo "FATAL: invalid mailbox name '${box}' in MAILBRIDGE_ROUTES." >&2
+    [!a-z0-9]*|*[!a-z0-9._-]*|"")
+      echo "FATAL: invalid mailbox name '${box}'." >&2
       echo "       Use lowercase letters, digits, dot, dash, underscore." >&2
       exit 1 ;;
   esac
+  if [ "${#box}" -gt 64 ]; then
+    echo "FATAL: mailbox name '${box}' exceeds 64 characters." >&2
+    exit 1
+  fi
   mkdir -p "${MAILBRIDGE_MAILDIR_ROOT}/${box}/tmp" \
            "${MAILBRIDGE_MAILDIR_ROOT}/${box}/new" \
            "${MAILBRIDGE_MAILDIR_ROOT}/${box}/cur"
@@ -52,25 +50,28 @@ done
 # passwd-file (rather than a static passdb) means only the mailboxes you
 # configured can log in - a typo'd username is rejected instead of silently
 # creating an empty mailbox.
+# Hash once for all accounts. Raw passwords may contain passwd-file delimiters.
+PASSWORD_HASH=$(doveadm pw -s SHA512-CRYPT -p "${MAILBRIDGE_IMAP_PASSWORD}")
+umask 0077
 : > /etc/dovecot/users
 for box in ${MAILBOXES}; do
-  printf '%s:{PLAIN}%s:%s:%s::%s/%s::\n' \
-    "${box}" "${MAILBRIDGE_IMAP_PASSWORD}" \
+  printf '%s:%s:%s:%s::%s/%s::\n' \
+    "${box}" "${PASSWORD_HASH}" \
     "${MAILBRIDGE_UID}" "${MAILBRIDGE_GID}" \
     "${MAILBRIDGE_MAILDIR_ROOT}" "${box}" >> /etc/dovecot/users
 done
-chmod 0600 /etc/dovecot/users
+# The unprivileged Dovecot auth process must be able to read its passwd-file.
+chown root:dovecot /etc/dovecot/users
+chmod 0640 /etc/dovecot/users
 if [ "$(id -u)" = "0" ]; then
   chown -R "${MAILBRIDGE_UID}:${MAILBRIDGE_GID}" "${MAILBRIDGE_MAILDIR_ROOT}"
   chmod -R 0700 "${MAILBRIDGE_MAILDIR_ROOT}"
-  chown root:root /etc/dovecot/users
 else
   echo "WARNING: not running as root; skipping chown of ${MAILBRIDGE_MAILDIR_ROOT}." >&2
   echo "         Dovecot refuses to handle mail as root, so do not override 'user:'." >&2
 fi
 
-# Dovecot's static passdb wants the password inline, which is why this file is
-# generated at boot rather than baked into the image or bind-mounted.
+# Generate the Dovecot config at boot; credentials live only in the passwd-file.
 cat > "${DOVECOT_CONF}" <<CONF
 protocols = imap
 listen = *

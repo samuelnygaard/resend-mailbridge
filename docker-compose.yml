@@ -91,13 +91,13 @@ services:
       # container logs a warning on every request.
       - RESEND_WEBHOOK_SECRET=${RESEND_WEBHOOK_SECRET:-}
       # --- Routing ---
-      # One mailbox per inbound address. Each mailbox becomes its own IMAP
-      # account, so each gets its own Libredesk inbox with its own From
-      # address — sales replies go out as sales@, not support@.
-      #   MAILBRIDGE_ROUTES=addr=mailbox,addr=mailbox
-      # Order matters: mail addressed to several routes lands in the FIRST
-      # match, producing one ticket rather than two.
-      - MAILBRIDGE_ROUTES=${MAILBRIDGE_ROUTES:?}
+      # Accepted addresses only: support@ -> support, sales@ -> sales.
+      # The entrypoint derives IMAP usernames and provisions isolated Maildirs.
+      # Every account shares the password below; no username mappings needed.
+      # Order matters: mail addressed to several entries lands in the FIRST.
+      # The supplied stack requires an allowlist; migrate old routes to addresses.
+      # Custom MAILBRIDGE_ROUTES mappings remain supported by the image.
+      - MAILBRIDGE_RECIPIENTS=${MAILBRIDGE_RECIPIENTS:?}
 
       # Where unmatched mail goes. Leave unset to DROP it — which is what you
       # want, because your Resend domain catches EVERY address at

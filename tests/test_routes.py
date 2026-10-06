@@ -47,7 +47,14 @@ os.environ.update(
   MAILBRIDGE_ROUTES="support@nelgixa.resend.app=support,sales@nelgixa.resend.app=sales",
 )
 os.environ.pop("MAILDIR",None); os.environ.pop("ALLOWED_RECIPIENTS",None)
-import sys; sys.path.insert(0,APP_DIR); import main
+os.environ.pop("MAILBRIDGE_RECIPIENTS",None)
+os.environ.pop("MAILBRIDGE_DEFAULT_MAILBOX",None)
+import sys
+AUTO = "--auto" in sys.argv
+if AUTO:
+    os.environ.pop("MAILBRIDGE_ROUTES")
+    os.environ["MAILBRIDGE_RECIPIENTS"] = "support@example.resend.app,sales@example.resend.app"
+sys.path.insert(0,APP_DIR); import main
 from fastapi.testclient import TestClient
 from svix.webhooks import Webhook
 # __enter__ runs the FastAPI startup event, which pre-creates every mailbox
@@ -98,7 +105,10 @@ assert d["per_mailbox"]=={"support":2,"sales":1}
 
 print("== bad mailbox name is rejected at startup ==")
 import importlib
-os.environ["MAILBRIDGE_ROUTES"]="a@b.com=../escape"
+if AUTO:
+    os.environ["MAILBRIDGE_RECIPIENTS"]="../escape@nelgixa.resend.app"
+else:
+    os.environ["MAILBRIDGE_ROUTES"]="a@b.com=../escape"
 try:
     importlib.reload(main); print("  FAILED: accepted"); raise SystemExit(1)
 except ValueError as e: print("  rejected:",e)

@@ -66,6 +66,9 @@ os.environ.update(
     MAILBRIDGE_IMAP_PORT="14300", MAILBRIDGE_IMAP_USER="support",
 )
 os.environ.pop("MAILDIR", None)
+os.environ.pop("MAILBRIDGE_RECIPIENTS", None)
+os.environ.pop("MAILBRIDGE_ROUTES", None)
+os.environ.pop("MAILBRIDGE_DEFAULT_MAILBOX", None)
 import sys; sys.path.insert(0, APP_DIR)
 import main
 from fastapi.testclient import TestClient

@@ -25,8 +25,9 @@ never touch the bridge.
 |---|---|
 | Webhook ingest, raw passthrough, dedupe, reconciler | ✅ done, tested |
 | Multi-mailbox routing (`MAILBRIDGE_ROUTES`) | ✅ done, tested |
+| Recipient-derived accounts (`MAILBRIDGE_RECIPIENTS`) | Configuration and routing tests cover automatic usernames |
 | Bundled Dovecot + supervisord image | ✅ boots in production (after v2 fixes) |
-| Dovecot passwd-file config (multi-mailbox) | ⚠️ written, **not yet verified against a running Dovecot** |
+| Dovecot passwd-file config (multi-mailbox) | Container smoke test checks shared-password login and mailbox isolation |
 | End-to-end on real Resend → Libredesk | ⚠️ single mailbox reached boot; full loop + sender attribution not yet confirmed |
 | CI (`.github/workflows/publish.yml`) | ⚠️ written, never run. Needs `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repo secrets |
 | Reconciler pagination | ❌ not implemented (fetches newest `RECONCILE_LIMIT` only) |
@@ -50,7 +51,8 @@ tests/               standalone scripts against a mock Resend API
 
 1. Resend POSTs `email.received` (metadata only) to `/webhook`.
 2. Signature verified with svix (`RESEND_WEBHOOK_SECRET`).
-3. Recipient matched against `MAILBRIDGE_ROUTES` → mailbox name, or dropped.
+3. Recipient matched against `MAILBRIDGE_RECIPIENTS` → local-part mailbox name,
+   or legacy `MAILBRIDGE_ROUTES` → explicit mailbox name; unmatched mail dropped.
 4. `GET /emails/receiving/{id}` → `raw.download_url` → original `.eml` bytes.
 5. Atomic Maildir delivery: write `tmp/`, fsync, `rename()` into `new/`.
 6. Dovecot serves each mailbox as its own IMAP user on :143.
@@ -72,6 +74,13 @@ tests/               standalone scripts against a mock Resend API
 - **Mailbox names are paths.** Validated in Python (`_sanitise_mailbox`) *and*
   shell (`entrypoint.sh`). Keep both; tests cover `../escape`.
 - **First matching route wins** — mail to support@ and sales@ = one ticket.
+- **Recipient-derived accounts use an address allowlist.** `MAILBRIDGE_RECIPIENTS`
+  derives usernames from local parts, provisions them at boot, and cannot be
+  combined with `MAILBRIDGE_ROUTES`. Different addresses cannot silently share
+  a derived username. The ordered allowlist determines routing precedence.
+- **All IMAP users share `MAILBRIDGE_IMAP_PASSWORD`.** Store only a salted hash
+  in the passwd-file, owned by `root:dovecot` with mode `0640`; the unprivileged
+  auth process must be able to read it. Never log passwords or hashes.
 - **Unrouted mail is dropped by default.** The Resend domain catches every
   address; a catch-all turns spam into tickets.
 - **Python side and Dovecot side must agree on paths**: Maildir is
@@ -102,17 +111,19 @@ tests/               standalone scripts against a mock Resend API
 pip install -r app/requirements.txt httpx
 python tests/test_bridge.py
 python tests/test_routes.py
+python tests/test_routes.py --auto
+python tests/test_auto_mailboxes.py
 sh -n entrypoint.sh
 ```
 
-Tests need no network, Docker or Dovecot. They do **not** exercise Dovecot or
-supervisord — those are only proven by a real container. After changing
-`entrypoint.sh` or the Dovecot config, verify in a container:
+The scripts above need no external network, Docker or Dovecot. After changing
+`entrypoint.sh` or the Dovecot config, also build and run the real container smoke
+test. It checks both IMAP users before mail arrives, exact message retrieval,
+mailbox isolation, wrong-password/unknown-user rejection and unsafe boot config:
 
 ```bash
-docker run --rm -e RESEND_API_KEY=x -e MAILBRIDGE_IMAP_PASSWORD=x \
-  -e MAILBRIDGE_ROUTES=a@b.c=support samuelnygaard/mailbridge:dev &
-docker exec <id> doveconf -n
+docker build -t mailbridge:test .
+python tests/test_container.py --image mailbridge:test
 ```
 
 ## Working rules for agents
@@ -126,9 +137,6 @@ docker exec <id> doveconf -n
 
 ## Ideas / next steps
 
-- Validate passwd-file Dovecot config in a real container; add a container
-  smoke test to CI.
 - Reconciler pagination.
-- Optional per-mailbox IMAP passwords.
 - Prometheus metrics or an alert when `last_delivery_at` goes stale.
 - Pin `libredesk/libredesk` to a version tag in the compose file.

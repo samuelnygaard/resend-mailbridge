@@ -41,7 +41,7 @@ _SAFE_MAILBOX = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 def _sanitise_mailbox(name: str) -> str:
     name = name.strip().lower()
-    if not _SAFE_MAILBOX.match(name):
+    if not _SAFE_MAILBOX.fullmatch(name):
         raise ValueError(
             f"invalid mailbox name {name!r}: use lowercase letters, digits, dot, dash, underscore"
         )
@@ -49,15 +49,49 @@ def _sanitise_mailbox(name: str) -> str:
 
 
 def parse_routes() -> list:
-    """MAILBRIDGE_ROUTES maps inbound addresses to mailboxes:
+    """Derive accounts from accepted addresses, or use legacy explicit routes.
+
+    MAILBRIDGE_RECIPIENTS=support@example.com,sales@example.com creates
+    support and sales accounts without configuring IMAP usernames.
+    MAILBRIDGE_ROUTES maps inbound addresses to mailboxes explicitly:
 
         support@nelgixa.resend.app=support,sales@nelgixa.resend.app=sales
 
     Order matters: an email addressed to several of them lands in the first
     match, so it becomes one ticket rather than two.
     """
+    recipients = os.environ.get("MAILBRIDGE_RECIPIENTS", "").strip()
     raw = os.environ.get("MAILBRIDGE_ROUTES", "").strip()
     routes = []
+    if recipients:
+        if raw:
+            raise ValueError("set MAILBRIDGE_RECIPIENTS or MAILBRIDGE_ROUTES, not both")
+        usernames = {}
+        for address in recipients.split(","):
+            address = address.strip().lower()
+            if not address:
+                continue
+            local, separator, domain = address.partition("@")
+            if not separator or len(domain) > 253 or not re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*",
+                domain,
+            ):
+                raise ValueError(f"invalid address in MAILBRIDGE_RECIPIENTS: {address!r}")
+            mailbox = _sanitise_mailbox(local)
+            if mailbox != local:
+                raise ValueError(f"invalid address in MAILBRIDGE_RECIPIENTS: {address!r}")
+            if mailbox in usernames:
+                if usernames[mailbox] == address:
+                    continue
+                raise ValueError(
+                    f"addresses {usernames[mailbox]!r} and {address!r} derive the same "
+                    f"IMAP username {mailbox!r}; use MAILBRIDGE_ROUTES for explicit mappings"
+                )
+            usernames[mailbox] = address
+            routes.append((address, mailbox))
+        if not routes:
+            raise ValueError("MAILBRIDGE_RECIPIENTS must contain at least one address")
+        return routes
     if raw:
         for pair in raw.split(","):
             pair = pair.strip()
@@ -302,13 +336,15 @@ async def webhook(request: Request):
 
     if WEBHOOK_SECRET:
         try:
-            event = Webhook(WEBHOOK_SECRET).verify(body, dict(request.headers))
+            Webhook(WEBHOOK_SECRET).verify(body, dict(request.headers))
         except WebhookVerificationError:
             log.warning("rejected webhook with bad signature")
             raise HTTPException(status_code=401, detail="invalid signature")
     else:
         log.warning("RESEND_WEBHOOK_SECRET unset - signature NOT verified")
-        event = json.loads(body)
+
+    # Svix 2.x verifies signatures without returning the parsed JSON event.
+    event = json.loads(body)
 
     if event.get("type") != "email.received":
         return {"ok": True, "ignored": event.get("type")}

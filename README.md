@@ -52,6 +52,8 @@ a letter or digit, followed by letters, digits, dots, dashes or underscores.
 Unsupported local parts such as `support+tag` fail startup rather than being
 silently renamed. Two different addresses with the same local part also fail
 startup; use explicit `MAILBRIDGE_ROUTES` for intentional shared/custom mappings.
+Both startup validators check every canonical name before creating directories;
+Python also validates names whenever constructing a Maildir path.
 
 ## Configuration
 
@@ -127,7 +129,7 @@ python tests/test_workers.py       # event-loop responsiveness and capacity
 sh -n entrypoint.sh
 ```
 
-Tests run against a mock Resend API — no account or network needed. Building:
+Tests run against a mock Resend API — no account or network needed.
 
 Recovery follows Resend's `has_more`/`after` pagination. Each sweep checks the
 newest page and resumes older history, up to `RECONCILE_MAX_PAGES` pages. The
@@ -143,6 +145,8 @@ only after ingestion completes; failures return 500 and capacity exhaustion
 returns 503 with `Retry-After`. Client disconnects do not release capacity until
 the underlying work finishes. Recovery uses its own single background thread.
 
+Build the image:
+
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 -t samuelnygaard/mailbridge:dev .
 ```
@@ -155,4 +159,5 @@ isolation, dummy credentials, no published ports or Resend calls):
 ```bash
 docker build -t mailbridge:test .
 python tests/test_container.py --image mailbridge:test
+docker run --rm --entrypoint python -v "$PWD:/workspace:ro" -w /workspace mailbridge:test tests/test_entrypoint.py
 ```

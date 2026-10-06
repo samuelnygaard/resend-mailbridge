@@ -37,6 +37,11 @@ never touch the bridge.
 Failed or stalled recovery makes it return 503 even when IMAP works. Public
 errors contain only safe error types/status codes, never signed URLs.
 
+Recovery uses `RECONCILE_LIMIT` (1–100 items/page) and `RECONCILE_MAX_PAGES`
+(2–100 pages/sweep, default 5). Its cursor and bounded failed-ID queue are saved
+on the mail volume. `MAILBRIDGE_INGEST_WORKERS` bounds active webhook ingests
+(1–32, default 4) inside the single Uvicorn process.
+
 ## Layout
 
 ```
@@ -83,7 +88,10 @@ tests/               standalone scripts against a mock Resend API
   merely because the requesting client disconnected.
 - **The signed `download_url` must not get an `Authorization` header.**
 - **Mailbox names are paths.** Validated in Python (`_sanitise_mailbox`) *and*
-  shell (`entrypoint.sh`). Keep both; tests cover `../escape`.
+  shell (`entrypoint.sh`) before any directory creation. Require canonical names
+  matching `[a-z0-9][a-z0-9._-]{0,63}`, preserve whitespace for rejection, and
+  disable shell glob expansion. Validate again at Python's path boundary.
+  Keep both; tests cover traversal, whitespace and the length boundary.
 - **First matching route wins** — mail to support@ and sales@ = one ticket.
 - **Recipient-derived accounts use an address allowlist.** `MAILBRIDGE_RECIPIENTS`
   derives usernames from local parts, provisions them at boot, and cannot be

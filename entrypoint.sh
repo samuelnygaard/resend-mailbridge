@@ -2,6 +2,9 @@
 # Renders dovecot.conf from environment variables, prepares the Maildir,
 # then hands off to supervisord which runs Dovecot + the webhook service.
 set -eu
+set -f  # Never expand mailbox names as filesystem globs.
+LC_ALL=C
+export LC_ALL
 
 : "${MAILBRIDGE_IMAP_USER:=support}"
 : "${MAILBRIDGE_MAILDIR_ROOT:=/srv/mail}"
@@ -29,6 +32,14 @@ fi
 # Use the same recipient-derived accounts and legacy mappings as the service.
 # Parsing happens before any filesystem changes, so invalid config fails safely.
 MAILBOXES=$(python -c 'from main import MAILBOXES; print("\n".join(MAILBOXES))')
+if [ -z "${MAILBOXES}" ]; then
+  echo "FATAL: no mailboxes configured." >&2
+  exit 1
+fi
+# Names are one per line. Preserve embedded spaces/tabs so validation rejects
+# them instead of splitting one invalid name into several accepted accounts.
+IFS='
+'
 
 for box in ${MAILBOXES}; do
   case "${box}" in
@@ -41,6 +52,10 @@ for box in ${MAILBOXES}; do
     echo "FATAL: mailbox name '${box}' exceeds 64 characters." >&2
     exit 1
   fi
+done
+
+# Validate the entire list before root creates any directories.
+for box in ${MAILBOXES}; do
   mkdir -p "${MAILBRIDGE_MAILDIR_ROOT}/${box}/tmp" \
            "${MAILBRIDGE_MAILDIR_ROOT}/${box}/new" \
            "${MAILBRIDGE_MAILDIR_ROOT}/${box}/cur"

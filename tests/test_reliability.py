@@ -176,6 +176,13 @@ class HealthTests(BridgeTest):
 
 
 class DeliveryTests(BridgeTest):
+    def test_delivery_rejects_unsafe_mailbox_before_filesystem_changes(self):
+        for mailbox in (".", "..", "../escape", "bad name", "*", "a" * 65):
+            with self.subTest(mailbox=mailbox), self.assertRaises(ValueError):
+                main.deliver(b"message bytes", "safe-id", mailbox)
+        self.assertFalse((self.root / "tmp").exists())
+        self.assertFalse((self.root.parent / "escape").exists())
+
     def test_concurrent_delivery_has_one_copy_across_mailboxes(self):
         entered = threading.Event()
         second_fsync = threading.Event()

@@ -45,6 +45,8 @@ _SAFE_MAILBOX = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
 def _sanitise_mailbox(name: str) -> str:
+    if not isinstance(name, str):
+        raise ValueError("mailbox name must be a string")
     name = name.strip().lower()
     if not _SAFE_MAILBOX.fullmatch(name):
         raise ValueError(
@@ -132,6 +134,8 @@ elif not ROUTES:
 
 
 def maildir_for(mailbox: str) -> pathlib.Path:
+    if _sanitise_mailbox(mailbox) != mailbox:
+        raise ValueError("mailbox path must use a normalized name")
     return MAILDIR_ROOT / mailbox
 
 IMAP_PORT = int(os.environ.get("MAILBRIDGE_IMAP_PORT", "143"))

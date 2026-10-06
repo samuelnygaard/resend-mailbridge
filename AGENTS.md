@@ -29,7 +29,7 @@ never touch the bridge.
 | Bundled Dovecot + supervisord image | ✅ boots in production (after v2 fixes) |
 | Dovecot passwd-file config (multi-mailbox) | Container smoke test checks shared-password login and mailbox isolation |
 | End-to-end on real Resend → Libredesk | ⚠️ single mailbox reached boot; full loop + sender attribution not yet confirmed |
-| CI (`.github/workflows/publish.yml`) | Secrets configured by maintainer; Python regressions and native AMD64/ARM64 container smoke tests gate publishing. GitHub execution not yet verified |
+| CI (`.github/workflows/publish.yml`) | Secrets configured by maintainer; Python/release regressions and native AMD64/ARM64 container tests gate automatic patch releases on main. GitHub execution not yet verified |
 | Reconciler pagination | Bounded cursor sweeps and durable failed-ID retries, tested against a mock API |
 | Monitoring / alerting | ❌ none. `/healthz` exposes the data; nothing consumes it yet |
 
@@ -47,6 +47,7 @@ on the mail volume. `MAILBRIDGE_INGEST_WORKERS` bounds active webhook ingests
 ```
 app/main.py          FastAPI webhook service + reconciler (all Python logic)
 app/requirements.txt fastapi, uvicorn, requests, svix, supervisor
+.github/scripts/release.cjs GitHub tag reservations and release completion
 entrypoint.sh        root: validate env, mkdir Maildirs, chown, render Dovecot
                      config + passwd-file, preflight binaries, exec supervisord
 supervisord.conf     runs dovecot (root master) and uvicorn (uid 1000)
@@ -138,6 +139,7 @@ python tests/test_auto_mailboxes.py
 python tests/test_reliability.py
 python tests/test_reconcile.py
 python tests/test_workers.py
+node --test tests/test_release.cjs
 sh -n entrypoint.sh
 ```
 
@@ -159,6 +161,12 @@ python tests/test_container.py --image mailbridge:test
   when env vars change.
 - Add a test to `tests/` for any change to routing, dedupe or delivery.
 - Prefer tagging releases (`v1.2.0`) over relying on `:latest` in production.
+- Main publishing reserves the next stable patch version with a Git tag
+  (bootstrap baseline `0.1.2`), then uploads and records the digest in a GitHub
+  Release. Keep allocation serialized across refs. A reservation survives
+  failure; retries reuse it, while completed releases and stale main runs skip.
+  Only the publishing job needs `contents: write`. GitHub's built-in token does
+  not trigger another workflow for its tag push, so upload stays in this run.
 
 ## Ideas / next steps
 

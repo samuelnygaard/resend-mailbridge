@@ -126,10 +126,13 @@ python tests/test_auto_mailboxes.py # configuration boundaries and compatibility
 python tests/test_reliability.py   # security and recovery regressions
 python tests/test_reconcile.py     # bounded pagination and durable retries
 python tests/test_workers.py       # event-loop responsiveness and capacity
+node --test tests/test_release.cjs # automatic release allocation and retries
 sh -n entrypoint.sh
 ```
 
-Tests run against a mock Resend API — no account or network needed.
+Python tests run against a mock Resend API — no account or network needed.
+The release tests require Node.js 24 and use GitHub API fixtures without making
+external requests.
 
 Recovery follows Resend's `has_more`/`after` pagination. Each sweep checks the
 newest page and resumes older history, up to `RECONCILE_MAX_PAGES` pages. The
@@ -171,15 +174,34 @@ ARM64 runners. Pull requests and manual runs on other branches run checks only.
 Configure repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`; the
 token must have write access to `samuelnygaard/mailbridge`. Publishing uses:
 
-- Pushes to `main`: `latest` and `sha-<full-commit-SHA>`.
+- Successful pushes to `main`: automatically increment the patch version and
+  publish that version, `latest`, and `sha-<full-commit-SHA>`. The bootstrap
+  baseline is `0.1.2`, so the first new release is `0.1.3` unless a higher stable
+  Git tag already exists. Versions are compared numerically; prereleases are
+  excluded from automatic version allocation.
 - Version tags such as `v1.2.3`: `1.2.3` and the commit tag. Prereleases such
   as `v1.2.3-rc.1` use their full version. Release tags leave `latest` unchanged;
   shared minor-version aliases are omitted to avoid races between releases.
-- **Actions → Test and publish image → Run workflow**: choose `main` to rebuild
-  and publish `latest`.
+- **Actions → Test and publish image → Run workflow**: choose `main` to finish
+  an incomplete release for the current commit. A completed release is skipped;
+  an untagged current commit receives the next patch version.
 
-Publishing runs for the same ref are serialized to avoid simultaneous writes
-to their tags. Malformed release tags fail before any image is published. Changing
-these files locally does not publish; push the changes before starting a run
-in GitHub. Maintainer-reported secrets are configured; the workflow has not yet
-been verified by a GitHub Actions run.
+The publishing job has `contents: write` permission to create version tags and
+GitHub Releases using GitHub's built-in token; no extra secret is needed. All
+publishing jobs share a concurrency group with up to 100 pending jobs. After
+tests pass, a Git tag reserves the version for the commit. Upload failures leave
+that reservation for retries, so failed or abandoned releases can leave gaps
+in published versions. After
+upload succeeds, the workflow creates a GitHub Release with generated notes
+and records the image digest. Retries of completed releases skip publishing;
+older `main` commits are also skipped to avoid moving `latest` backwards.
+If an explicit tag already published the current main commit, its recorded
+image digest is promoted to `latest` without rebuilding or incrementing again.
+
+Explicit release tags must use `vMAJOR.MINOR.PATCH` or a semantic prerelease
+suffix; build metadata (`+...`) is unsupported. Malformed tags fail before any
+image is published. Image upload happens in the same workflow: tags created by
+GitHub's built-in token do not trigger another push workflow. Changing files
+locally does not publish; push the changes before starting a run in GitHub.
+Maintainer-reported secrets are configured; automatic release publishing has
+not yet been verified by a GitHub Actions run.

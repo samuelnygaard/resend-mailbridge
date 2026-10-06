@@ -10,9 +10,9 @@ on:
 permissions:
   contents: read
 
-# Serialize runs from the same ref to prevent concurrent tag writes.
+# Cancel superseded PR checks; publishing has its own queue below.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -29,6 +29,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --test tests/test_release.cjs
       - run: pip install -r tests/requirements.txt
       - run: python tests/test_bridge.py
       - run: python tests/test_routes.py
@@ -82,6 +86,13 @@ jobs:
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: write
+    # All release refs share one allocator; explicit version tags cannot race it.
+    concurrency:
+      group: dockerhub-release
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,35 +106,43 @@ jobs:
             echo "::error::Set the DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repository secrets. The token needs write access to samuelnygaard/mailbridge."
             exit 1
           fi
+      - name: Select or reuse the release version
+        id: release
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { prepareRelease } = require('./.github/scripts/release.cjs');
+            const result = await prepareRelease({ github, context, image: process.env.IMAGE_NAME });
+            for (const [name, value] of Object.entries(result)) core.setOutput(name, value);
+            core.info(result.publish === 'true'
+              ? `Publishing ${result.tag}`
+              : 'Skipping a completed release or an older main commit.');
+
       - uses: docker/setup-qemu-action@v3
+        if: steps.release.outputs.publish == 'true' && steps.release.outputs.digest == ''
       - uses: docker/setup-buildx-action@v3
+        if: steps.release.outputs.publish == 'true'
 
       - uses: docker/login-action@v3
+        if: steps.release.outputs.publish == 'true'
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - id: meta
         uses: docker/metadata-action@v5
+        if: steps.release.outputs.publish == 'true' && steps.release.outputs.digest == ''
         with:
           images: ${{ env.IMAGE_NAME }}
           flavor: latest=false
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=semver,pattern={{version}}
+            type=semver,pattern={{version}},value=${{ steps.release.outputs.version }}
             type=sha,format=long
 
-      - name: Reject malformed release tags
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          IMAGE_VERSION: ${{ steps.meta.outputs.version }}
-        run: |
-          if [ "$IMAGE_VERSION" = "sha-$GITHUB_SHA" ]; then
-            echo "::error::Release tags must be semantic versions, for example v1.2.3 or v1.2.3-rc.1."
-            exit 1
-          fi
-
       - uses: docker/build-push-action@v6
+        id: image
+        if: steps.release.outputs.publish == 'true' && steps.release.outputs.digest == ''
         with:
           context: .
           file: ./Dockerfile
@@ -136,3 +155,21 @@ jobs:
             type=gha,scope=container-arm64
             type=gha,scope=publish
           cache-to: type=gha,mode=max,scope=publish
+
+      - name: Promote an existing release image to latest
+        if: steps.release.outputs.publish == 'true' && steps.release.outputs.digest != ''
+        env:
+          IMAGE_DIGEST: ${{ steps.release.outputs.digest }}
+        run: docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$IMAGE_DIGEST"
+
+      - name: Record the successful image as a GitHub Release
+        if: steps.release.outputs.publish == 'true'
+        uses: actions/github-script@v8
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.release.outputs.digest || steps.image.outputs.digest }}
+        with:
+          script: |
+            const { completeRelease } = require('./.github/scripts/release.cjs');
+            await completeRelease({ github, context, image: process.env.IMAGE_NAME,
+              version: process.env.RELEASE_VERSION, digest: process.env.IMAGE_DIGEST });

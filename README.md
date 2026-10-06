@@ -69,6 +69,7 @@ startup; use explicit `MAILBRIDGE_ROUTES` for intentional shared/custom mappings
 | `MAILBRIDGE_HTTP_PORT` / `MAILBRIDGE_IMAP_PORT` | no | `8080` / `143` | |
 | `RECONCILE_INTERVAL` / `RECONCILE_LIMIT` | no | `300` / `100` | Recovery sweep |
 | `RECONCILE_MAX_PAGES` | no | `5` | List pages per sweep, 2–100; page size 1–100 |
+| `MAILBRIDGE_INGEST_WORKERS` | no | `4` | Active webhook ingests, 1–32; excess requests receive 503 for retry |
 | `LOG_LEVEL` | no | `INFO` | |
 
 When migrating from explicit routes, replace `MAILBRIDGE_ROUTES` with
@@ -122,6 +123,7 @@ python tests/test_routes.py --auto  # routing with recipient-derived usernames
 python tests/test_auto_mailboxes.py # configuration boundaries and compatibility
 python tests/test_reliability.py   # security and recovery regressions
 python tests/test_reconcile.py     # bounded pagination and durable retries
+python tests/test_workers.py       # event-loop responsiveness and capacity
 sh -n entrypoint.sh
 ```
 
@@ -134,6 +136,12 @@ survive restarts. Up to `RECONCILE_LIMIT` failed IDs are retried each sweep;
 successful messages still deduplicate solely against their Maildir filenames.
 The retry list holds up to 1,000 IDs; at capacity a failing page keeps its cursor
 for the next sweep. Health exposes pending count and safe recovery errors.
+
+Webhook downloads, retries and filesystem writes run in bounded worker threads.
+Health requests remain responsive during slow ingestion. A webhook returns 200
+only after ingestion completes; failures return 500 and capacity exhaustion
+returns 503 with `Retry-After`. Client disconnects do not release capacity until
+the underlying work finishes. Recovery uses its own single background thread.
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 -t samuelnygaard/mailbridge:dev .

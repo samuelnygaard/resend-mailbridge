@@ -13,6 +13,8 @@ and attributes contacts exactly as it would against a real mailbox.
 
 import email.utils
 import copy
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import json
 import imaplib
 import logging
@@ -139,6 +141,9 @@ RECONCILE_LIMIT = int(os.environ.get("RECONCILE_LIMIT", "100"))
 RECONCILE_MAX_PAGES = int(os.environ.get("RECONCILE_MAX_PAGES", "5"))
 if not 1 <= RECONCILE_LIMIT <= 100 or not 2 <= RECONCILE_MAX_PAGES <= 100 or RECONCILE_INTERVAL < 1:
     raise ValueError("recovery requires limit 1-100, max pages 2-100 and a positive interval")
+INGEST_WORKERS = int(os.environ.get("MAILBRIDGE_INGEST_WORKERS", "4"))
+if not 1 <= INGEST_WORKERS <= 32:
+    raise ValueError("MAILBRIDGE_INGEST_WORKERS must be between 1 and 32")
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "30"))
 DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "180"))
 RECONCILER_ENABLED = os.environ.get("DISABLE_RECONCILER") != "1"
@@ -158,6 +163,8 @@ STATS_LOCK = threading.Lock()
 # Bounded lock storage. The same email ID always uses the same reentrant lock,
 # including nested ingest -> deliver calls and different mailbox destinations.
 EMAIL_LOCKS = tuple(threading.RLock() for _ in range(64))
+INGEST_EXECUTOR = ThreadPoolExecutor(max_workers=INGEST_WORKERS, thread_name_prefix="ingest")
+INGEST_SLOTS = threading.BoundedSemaphore(INGEST_WORKERS)
 
 
 def email_lock(email_id: str):
@@ -389,6 +396,25 @@ def _ingest(email_id: str, hint: Optional[dict] = None) -> None:
 # ---------------------------------------------------------------- routes
 
 
+async def ingest_in_worker(email_id: str, hint: dict) -> None:
+    # Limit admitted work as well as thread count: no unbounded executor queue.
+    slots = INGEST_SLOTS
+    if not slots.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="ingest capacity full", headers={"Retry-After": "1"})
+    try:
+        future = INGEST_EXECUTOR.submit(ingest, email_id, hint)
+    except Exception:
+        slots.release()
+        raise
+    # A disconnected/cancelled request must not free capacity while its worker
+    # is still downloading or delivering. Release when the actual work ends.
+    future.add_done_callback(lambda _: slots.release())
+    wrapped = asyncio.wrap_future(future)
+    # Consume background exceptions even if the requesting coroutine disappears.
+    wrapped.add_done_callback(lambda result: None if result.cancelled() else result.exception())
+    await asyncio.shield(wrapped)
+
+
 @app.post("/webhook")
 async def webhook(request: Request):
     if not WEBHOOK_SECRET:
@@ -424,7 +450,7 @@ async def webhook(request: Request):
         raise HTTPException(status_code=400, detail="invalid email_id") from None
 
     try:
-        ingest(email_id, hint=data)
+        await ingest_in_worker(email_id, data)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

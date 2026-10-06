@@ -78,6 +78,9 @@ tests/               standalone scripts against a mock Resend API
   cross-process locking is added. Email IDs must be safe filename components.
 - **Ingest failures return HTTP 500.** That triggers Resend's retries.
   Never swallow the exception.
+  Offload webhook ingest to bounded threads; return 503 when capacity is full.
+  Never acknowledge success before delivery completes or release a worker slot
+  merely because the requesting client disconnected.
 - **The signed `download_url` must not get an `Authorization` header.**
 - **Mailbox names are paths.** Validated in Python (`_sanitise_mailbox`) *and*
   shell (`entrypoint.sh`). Keep both; tests cover `../escape`.
@@ -126,6 +129,7 @@ python tests/test_routes.py --auto
 python tests/test_auto_mailboxes.py
 python tests/test_reliability.py
 python tests/test_reconcile.py
+python tests/test_workers.py
 sh -n entrypoint.sh
 ```
 

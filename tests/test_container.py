@@ -9,6 +9,9 @@ PROBE = r'''
 import imaplib
 import json
 import os
+import grp
+import pwd
+import stat
 import time
 import urllib.request
 
@@ -24,6 +27,25 @@ while True:
         time.sleep(0.25)
 assert health['mailboxes'] == ['sales', 'support'], health
 password = os.environ['MAILBRIDGE_IMAP_PASSWORD']
+
+users = os.stat('/etc/dovecot/users')
+assert users.st_uid == 0 and users.st_gid == grp.getgrnam('dovecot').gr_gid
+assert stat.S_IMODE(users.st_mode) == 0o640
+# The auth process must read the hash, while the webhook uid must not.
+for uid, gid, allowed in [(pwd.getpwnam('dovecot').pw_uid, grp.getgrnam('dovecot').gr_gid, True),
+                          (1000, 1000, False)]:
+    pid = os.fork()
+    if pid == 0:
+        os.setgroups([])
+        os.setgid(gid)
+        os.setuid(uid)
+        try:
+            with open('/etc/dovecot/users', 'rb') as file:
+                file.read()
+            os._exit(0 if allowed else 1)
+        except PermissionError:
+            os._exit(1 if allowed else 0)
+    assert os.waitpid(pid, 0)[1] == 0, 'passwd-file access is incorrect'
 
 # Accounts must work before any messages have arrived.
 for user in ['support', 'sales']:

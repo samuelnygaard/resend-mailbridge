@@ -26,6 +26,7 @@ jobs:
       - run: python tests/test_reliability.py
       - run: sh -n entrypoint.sh
       - run: docker build -t mailbridge:test .
+      - run: docker run --rm --entrypoint python -v "$PWD:/workspace:ro" -w /workspace mailbridge:test tests/test_entrypoint.py
       - run: python tests/test_container.py --image mailbridge:test
 
   publish:

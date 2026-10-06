@@ -53,16 +53,20 @@ done
 # Hash once for all accounts. Raw passwords may contain passwd-file delimiters.
 PASSWORD_HASH=$(doveadm pw -s SHA512-CRYPT -p "${MAILBRIDGE_IMAP_PASSWORD}")
 umask 0077
-: > /etc/dovecot/users
+USERS_TMP=$(mktemp /etc/dovecot/users.XXXXXX)
+trap 'rm -f "${USERS_TMP}"' EXIT HUP INT TERM
 for box in ${MAILBOXES}; do
   printf '%s:%s:%s:%s::%s/%s::\n' \
     "${box}" "${PASSWORD_HASH}" \
     "${MAILBRIDGE_UID}" "${MAILBRIDGE_GID}" \
-    "${MAILBRIDGE_MAILDIR_ROOT}" "${box}" >> /etc/dovecot/users
+    "${MAILBRIDGE_MAILDIR_ROOT}" "${box}" >> "${USERS_TMP}"
 done
 # The unprivileged Dovecot auth process must be able to read its passwd-file.
-chown root:dovecot /etc/dovecot/users
-chmod 0640 /etc/dovecot/users
+chown root:dovecot "${USERS_TMP}"
+chmod 0640 "${USERS_TMP}"
+# Publish only after the authentication process can read the complete file.
+mv -f "${USERS_TMP}" /etc/dovecot/users
+trap - EXIT HUP INT TERM
 if [ "$(id -u)" = "0" ]; then
   chown -R "${MAILBRIDGE_UID}:${MAILBRIDGE_GID}" "${MAILBRIDGE_MAILDIR_ROOT}"
   chmod -R 0700 "${MAILBRIDGE_MAILDIR_ROOT}"

@@ -78,7 +78,8 @@ Compose definition; do not pass both to the container.
 
 The shared password is stored as a salted hash in Dovecot's passwd-file. Only
 root and Dovecot's authentication group can read it; unknown usernames and
-incorrect passwords are rejected.
+incorrect passwords are rejected. The file is replaced atomically only after
+its owner and permissions are set, so a failed preparation preserves accounts.
 
 ## Libredesk inbox settings
 

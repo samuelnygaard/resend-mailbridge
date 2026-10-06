@@ -80,7 +80,9 @@ tests/               standalone scripts against a mock Resend API
   a derived username. The ordered allowlist determines routing precedence.
 - **All IMAP users share `MAILBRIDGE_IMAP_PASSWORD`.** Store only a salted hash
   in the passwd-file, owned by `root:dovecot` with mode `0640`; the unprivileged
-  auth process must be able to read it. Never log passwords or hashes.
+  auth process must be able to read it. Set permissions before atomically
+  replacing the file; preserve the previous file on preparation failure.
+  Never log passwords or hashes.
 - **Unrouted mail is dropped by default.** The Resend domain catches every
   address; a catch-all turns spam into tickets.
 - **Python side and Dovecot side must agree on paths**: Maildir is
